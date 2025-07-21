@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Omaccy</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+
+<body class="max-w-screen-sm mx-auto flex flex-col items-center justify-center">
+  <main class="mt-10 w-full flex flex-col items-center justify-center">
+    <pre class="text-[8px] font-mono -mb-6">
+      ████       ███                                                                                                                     
+    ████████   ████████         ████████                                                                                                 
+   ██     ██   ██    ███      ███      ███                                           ██                                                   
+   ███    ██   ██    ██      ███       ████   █       ███      ███           ███  ████        ████          ████     █                   
+    ██████████████████      ███        ████     ███ ██  ███ ███ ████      ████   █████     ████  ███     ████  ███    ████     ████      
+          ██   ██          ████        ████    █████    ████     ███     ███      ███     ███     ███  ████     ███   ████     ███       
+          ██   ██          ████        ████    ████     ███     ████    ████     ████    ████    ███   ████    ███    ███     ████       
+    ███████████████████    ████        ███     ███     ████     ████    ████     ████    ███          ████           ████     ████       
+   ██     ██   ██    ███   ███        ████    ████     ████     ███     ███      ███    ████          ████           ████     ███        
+   ███   ███   ██    ███   ███       ████     ████     ███     ████     ███     ████     ███      █    ███     ██    ███     ████        
+    ███████     ███████      ██████████       ███     ████      ██████   █████████████   █████████     █████████    ████████████        
+                                                                                                                             ███         
+                                                                                                                    ██      ███          
+                                                                                                                     ██   ████           
+                                                                                                                        ██               
+    </pre>
+    <p class="text-gray-500">
+      Opinionated macOS set up by
+      <a href="https://twitter.com/thmsmlr" class="underline" target="_blank" rel="noopener noreferrer">@thmsmlr</a>
+    </p>
+    <div class="mt-4">
+      <pre
+        class="bg-gray-100 text-sm rounded-lg p-4 font-mono overflow-x-auto shadow-lg border border-gray-200">curl -LsSf https://omaccy.com/install | sh </pre>
+    </div>
+    <section class="w-full flex flex-row items-center justify-center space-x-2 text-sm mt-4">
+      <a href="https://github.com/thmsmlr/omaccy/blob/main/README.md" class="text-gray-700 underline" target="_blank"
+        rel="noopener noreferrer">
+        The Manual
+      </a>
+      <span class="text-gray-400">|</span>
+      <a href="https://github.com/thmsmlr/omaccy" class="text-gray-700 underline" target="_blank"
+        rel="noopener noreferrer">
+        The Code
+      </a>
+      <span class="text-gray-400">|</span>
+      <a href="https://discord.gg/omaccy" class="text-gray-700 underline" target="_blank" rel="noopener noreferrer">
+        The Discord
+      </a>
+    </section>
+    <section class="w-full flex flex-col items-center mt-8">
+      <div class="aspect-w-16 aspect-h-9 w-full max-w-xl rounded-lg overflow-hidden shadow-lg">
+        <iframe src="https://www.youtube.com/embed/I5Mnni7cea8" title="Omaccy Demo" frameborder="0"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowfullscreen class="w-full h-64 md:h-80"></iframe>
+      </div>
+      <p class="mt-2 text-gray-500 text-xs">Watch the demo on YouTube</p>
+    </section>
+  </main>
+
+  <section class="w-full mt-12 px-4 [&_a]:underline [&_h2]:mt-12 [&_p]:mt-5 leading-[1.66]">
+    <h2 class="text-xl text-center font-serif font-medium text-gray-800">The Philosophy</h2>
+    <p>
+      <strong>Omaccy</strong> is built on the belief that your computer should work for you, not the other way around.
+      Maybe you've been tempted by Linux with its infinite customization, but you're unwilling to get rid of your
+      MacBook.
+      You love your AirPods. You love iMessage. You love AirDrop. You just can't stand to downgrade to a non-Apple
+      Silicon chip. You want the customizability of Linux without throwing the baby out with the bathwater.
+      Omaccy is here for you.
+    </p>
+    <p>
+      This setup is intentionally opinionated: it provides a curated set of automations and sensible configurations,
+      so you can get productive quickly and focus on what matters. It's designed to keep your hands on the keyboard.
+      It’s designed to be easy to install, easy to update, and easy to reset. It's also designed to be easy to
+      understand and easy to modify.
+    </p>
+
+    <h2 class="text-xl font-serif font-medium text-gray-800 mt-12">The Features</h2>
+    <p>
+      Omaccy is primarily built on top of <a href="https://www.hammerspoon.org/" target="_blank"
+        rel="noopener noreferrer">Hammerspoon</a> and <a href="https://github.com/mogenson/PaperWM.spoon"
+        target="_blank" rel="noopener noreferrer">PaperWM</a>. Hammerspoon is a powerful automation engine for macOS
+      that lets you script and control nearly every aspect of your system, from window management to hotkeys and beyond.
+      PaperWM is a tiling window manager extension for Hammerspoon, inspired by the PaperWM project for GNOME, which
+      brings a horizontal, scrolling window manager to your Mac.
+    </p>
+    <p>
+
+    </p>
+  </section>
+</body>
+
+</html>
