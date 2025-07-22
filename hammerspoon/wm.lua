@@ -141,7 +141,7 @@ Other TODOs:
     - [x] focusIfExists
     - [x] singleton
 - [ ] switchToSpace should appropriately handle floating windows.
-- [ ] Retile should manage z-index of windows across columns and rows using getOrderedWindows()
+- [x] Retile should manage z-index of windows across columns and rows using getOrderedWindows()
 - [ ] When a screen is removed, all spaces on that screen should be moved to the rightmost screen
 
 
@@ -281,6 +281,80 @@ local function retile(state, screenId, spaceId)
             end
         end
         x = x + maxColWidth + WM.tileGap
+    end
+
+    ----------------------------------------------------------------
+    -- Z-ORDER: ensure a consistent stacking of windows
+    ----------------------------------------------------------------
+    local totalWindowCount = #flatten(cols)
+    local _, _, focusedColIdx = locateWindow(focusedWindowId)
+
+    if focusedColIdx then
+        local ordered = {}   -- front (index 1)  →  back (last)
+
+        -- Helper to append all windows from a column (optionally skipping one)
+        local function appendColumn(colIdx, skipId)
+            local col = cols[colIdx]
+            if not col then return end
+            for _, id in ipairs(col) do
+                if id ~= skipId then table.insert(ordered, id) end
+            end
+        end
+
+        -- 1. Focused window
+        table.insert(ordered, focusedWindowId)
+
+        -- 2. Other rows in the same column
+        appendColumn(focusedColIdx, focusedWindowId)
+
+        -- 3. Columns farther from focus: left-1, right-1, left-2, right-2, …
+        local offset = 1
+        while #ordered < totalWindowCount do
+            local leftIdx  = focusedColIdx - offset
+            local rightIdx = focusedColIdx + offset
+            if leftIdx  >= 1      then appendColumn(leftIdx)  end
+            if rightIdx <= #cols  then appendColumn(rightIdx) end
+            offset = offset + 1
+        end
+
+        ----------------------------------------------------------------
+        -- Raise ONLY the windows that need it (minimal diff)
+        ----------------------------------------------------------------
+
+        -- Current z-order for our tiled windows (front-to-back)
+        local currentPos = {}
+        do
+            local wanted = {}
+            for _, id in ipairs(ordered) do wanted[id] = true end
+
+            local idx = 1
+            for _, w in ipairs(hs.window.orderedWindows()) do
+                local id = w:id()
+                if wanted[id] then
+                    currentPos[id] = idx
+                    idx = idx + 1
+                end
+            end
+        end
+
+        -- Walk desired order back→front, raising only when needed
+        local minFront = math.huge            -- frontmost index seen so far
+        for i = #ordered, 1, -1 do
+            local id  = ordered[i]
+            local pos = currentPos[id] or math.huge
+
+            -- If this window is currently *behind* something that should be
+            -- behind it, lift it; otherwise leave it where it is.
+            if pos > minFront then
+                local w = getWindow(id)
+                if w then w:raise() end
+                minFront = 0                   -- now frontmost
+            else
+                if pos < minFront then
+                    minFront = pos
+                end
+            end
+        end
     end
 end
 
@@ -431,7 +505,9 @@ addToWindowStack = function(win)
 end
 
 local windowWatcherPaused = false
-WM._windowWatcher = hs.window.filter.new():subscribe(
+WM._windowWatcher = hs.window.filter.new()
+
+WM._windowWatcher:subscribe(
     hs.window.filter.windowFocused,
     function(win, appName, event)
         if windowWatcherPaused then return end
@@ -443,7 +519,9 @@ WM._windowWatcher = hs.window.filter.new():subscribe(
             state.activeSpaceForScreen[screenId] = spaceId
             retileAll()
         end
-    end
+        bringIntoView(win)
+        centerMouseInWindow(win)
+    -- 
 )
 
 -- Subscribe to window created/destroyed events to update state
