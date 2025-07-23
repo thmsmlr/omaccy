@@ -171,15 +171,14 @@ local function getWindow(winId)
     return _windows[winId]
 end
 
-local function focusWindow(w, callback, opts)
-    local skipStack = opts and opts.skipStack or false
-    if not skipStack then WM._windowWatcherPaused = true end
-
+local function focusWindow(w, callback)
     local function waitForFocus(attempts)
         if attempts == 0 then return end
-
+        local app = w:application()
+        app:activate(true)
+        local axApp = hs.axuielement.applicationElement(app)
+        local wasEnhanced = axApp.AXEnhancedUserInterface
         if Window.focusedWindow() ~= w then
-            w:application():activate(true)
             Timer.doAfter(0.001, function()
                 w:focus()
                 Timer.doAfter(0.001, function()
@@ -187,10 +186,7 @@ local function focusWindow(w, callback, opts)
                 end)
             end)
         else
-            if not skipStack then
-                WM._windowWatcherPaused = false
-                addToWindowStack(w)
-            end
+            if wasEnhanced then axApp.AXEnhancedUserInterface = true end
             if callback then
                 callback()
             end
@@ -227,6 +223,80 @@ local function locateWindow(windowId)
     return foundScreenId, foundSpaceId, foundColIdx, foundRowIdx
 end
 
+local function updateZOrder(cols, focusedWindowId)
+    if not cols or #cols == 0 or not focusedWindowId then return end
+
+    local totalWindowCount = #flatten(cols)
+    local _, _, focusedColIdx = locateWindow(focusedWindowId)
+    if not focusedColIdx then return end
+
+    -- Build desired front-to-back order
+    local ordered = {}
+
+    local function appendColumn(colIdx, skipId)
+        local col = cols[colIdx]
+        if not col then return end
+        for _, id in ipairs(col) do
+            if id ~= skipId then table.insert(ordered, id) end
+        end
+    end
+
+    table.insert(ordered, focusedWindowId)       -- 1) focused window
+    appendColumn(focusedColIdx, focusedWindowId) -- 2) rest of its column
+
+    local offset = 1                             -- 3) neighbouring columns
+    while #ordered < totalWindowCount do
+        local leftIdx  = focusedColIdx - offset
+        local rightIdx = focusedColIdx + offset
+        if leftIdx >= 1 then appendColumn(leftIdx) end
+        if rightIdx <= #cols then appendColumn(rightIdx) end
+        offset = offset + 1
+    end
+
+    -- Current positions in the global z-stack (front = small index)
+    local currentPos = {}
+    do
+        local wanted = {}
+        for _, id in ipairs(ordered) do wanted[id] = true end
+
+        local idx = 1
+        for _, w in ipairs(hs.window.orderedWindows()) do
+            local id = w:id()
+            if wanted[id] then
+                currentPos[id] = idx
+                idx = idx + 1
+            end
+        end
+    end
+
+    -- Raise back→front, but only if relative order is wrong
+    local minFront = math.huge
+    for i = #ordered, 1, -1 do
+        local id  = ordered[i]
+        local pos = currentPos[id] or math.huge
+
+        if pos > minFront then -- behind something it should front-run
+            local w = getWindow(id)
+            if w then
+                local title = w:title() or "<unknown>"
+
+                print(string.format("[updateZOrder] Raising window %s (id %s, pos %s) to front", title, tostring(id),
+                    tostring(pos)))
+                w:raise()
+            end
+            minFront = 0
+        else
+            if pos < minFront then
+                minFront = pos
+            end
+        end
+    end
+
+    -- Window(355518):raise()
+    -- Window(426929):raise()
+end
+
+
 local function retile(state, screenId, spaceId)
     local focusedWindowId = Window.focusedWindow():id()
     local cols = state.screens[screenId][spaceId].cols
@@ -238,7 +308,9 @@ local function retile(state, screenId, spaceId)
     local h = screenFrame.h
     local x = state.startXForScreenAndSpace[screenId][spaceId]
 
-    for _, col in ipairs(cols) do
+    local targetColIdx = nil
+
+    for idx, col in ipairs(cols) do
         -- Find the maximum width in this column
         local maxColWidth = 0
         for _, winId in ipairs(col) do
@@ -260,7 +332,7 @@ local function retile(state, screenId, spaceId)
 
         local colX = x
         local rowY = y
-        for idx, winId in ipairs(col) do
+        for jdx, winId in ipairs(col) do
             local win = getWindow(winId)
             if win then
                 local frame = win:frame()
@@ -272,90 +344,35 @@ local function retile(state, screenId, spaceId)
                 frame.w = maxColWidth
 
                 -- Distribute remainder pixels to the first windows
-                local extra = (idx <= remainder) and 1 or 0
+                local extra = (jdx <= remainder) and 1 or 0
                 local winHeight = baseHeight + extra
                 frame.h = winHeight
 
                 win:setFrame(frame, 0)
                 rowY = rowY + winHeight + WM.tileGap
+                if winId == focusedWindowId then
+                    targetColIdx = idx
+                end
             end
         end
         x = x + maxColWidth + WM.tileGap
     end
 
-    ----------------------------------------------------------------
-    -- Z-ORDER: ensure a consistent stacking of windows
-    ----------------------------------------------------------------
-    local totalWindowCount = #flatten(cols)
-    local _, _, focusedColIdx = locateWindow(focusedWindowId)
+    if targetColIdx then
+        for _, winId in ipairs(cols[targetColIdx]) do
+            local win = getWindow(winId)
+            if win then
+                if winId == focusedWindowId then
 
-    if focusedColIdx then
-        local ordered = {}   -- front (index 1)  →  back (last)
-
-        -- Helper to append all windows from a column (optionally skipping one)
-        local function appendColumn(colIdx, skipId)
-            local col = cols[colIdx]
-            if not col then return end
-            for _, id in ipairs(col) do
-                if id ~= skipId then table.insert(ordered, id) end
-            end
-        end
-
-        -- 1. Focused window
-        table.insert(ordered, focusedWindowId)
-
-        -- 2. Other rows in the same column
-        appendColumn(focusedColIdx, focusedWindowId)
-
-        -- 3. Columns farther from focus: left-1, right-1, left-2, right-2, …
-        local offset = 1
-        while #ordered < totalWindowCount do
-            local leftIdx  = focusedColIdx - offset
-            local rightIdx = focusedColIdx + offset
-            if leftIdx  >= 1      then appendColumn(leftIdx)  end
-            if rightIdx <= #cols  then appendColumn(rightIdx) end
-            offset = offset + 1
-        end
-
-        ----------------------------------------------------------------
-        -- Raise ONLY the windows that need it (minimal diff)
-        ----------------------------------------------------------------
-
-        -- Current z-order for our tiled windows (front-to-back)
-        local currentPos = {}
-        do
-            local wanted = {}
-            for _, id in ipairs(ordered) do wanted[id] = true end
-
-            local idx = 1
-            for _, w in ipairs(hs.window.orderedWindows()) do
-                local id = w:id()
-                if wanted[id] then
-                    currentPos[id] = idx
-                    idx = idx + 1
+                else
+                    win:raise()
                 end
             end
         end
-
-        -- Walk desired order back→front, raising only when needed
-        local minFront = math.huge            -- frontmost index seen so far
-        for i = #ordered, 1, -1 do
-            local id  = ordered[i]
-            local pos = currentPos[id] or math.huge
-
-            -- If this window is currently *behind* something that should be
-            -- behind it, lift it; otherwise leave it where it is.
-            if pos > minFront then
-                local w = getWindow(id)
-                if w then w:raise() end
-                minFront = 0                   -- now frontmost
-            else
-                if pos < minFront then
-                    minFront = pos
-                end
-            end
-        end
+        getWindow(focusedWindowId):raise()
     end
+
+    updateZOrder(cols, focusedWindowId)
 end
 
 local function bringIntoView(win)
@@ -520,8 +537,7 @@ WM._windowWatcher:subscribe(
             retileAll()
         end
         bringIntoView(win)
-        centerMouseInWindow(win)
-    -- 
+    end
 )
 
 -- Subscribe to window created/destroyed events to update state
@@ -635,13 +651,15 @@ function WM:navigateStack(direction)
     focusWindow(win, function()
         bringIntoView(win)
         centerMouseInWindow(win)
+        addToWindowStack(win)
         hs.timer.doAfter(0.1, function()
             windowWatcherPaused = false
         end)
-    end, { skipStack = true })
+    end)
 end
 
 function WM:focusDirection(direction)
+    windowWatcherPaused = true
     local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(Window.focusedWindow():id())
 
     if not currentColIdx then return end
@@ -664,11 +682,14 @@ function WM:focusDirection(direction)
     if currentRowIdx > #state.screens[currentScreenId][currentSpace].cols[currentColIdx] then return end
 
     local nextWindow = getWindow(state.screens[currentScreenId][currentSpace].cols[currentColIdx][currentRowIdx])
-    retileAll()
     if nextWindow then
         focusWindow(nextWindow, function()
+            addToWindowStack(nextWindow)
             bringIntoView(nextWindow)
             centerMouseInWindow(nextWindow)
+            hs.timer.doAfter(0.1, function()
+                windowWatcherPaused = false
+            end)
         end)
     end
 end
@@ -892,9 +913,8 @@ function WM:switchToSpace(spaceId)
     local currentSpace = state.activeSpaceForScreen[screenId]
     if currentSpace == spaceId then return end
 
-    moveSpaceWindowsOffscreen(screenId, currentSpace)
     state.activeSpaceForScreen[screenId] = spaceId
-    retile(state, screenId, spaceId)
+    retileAll()
 
     local candidateWindowIds = flatten(state.screens[screenId][spaceId].cols)
     local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
@@ -902,9 +922,12 @@ function WM:switchToSpace(spaceId)
     if nextWindowId then
         local nextWindow = getWindow(nextWindowId)
         focusWindow(nextWindow, function()
+            addToWindowStack(nextWindow)
             bringIntoView(nextWindow)
             centerMouseInWindow(nextWindow)
-            windowWatcherPaused = false
+            hs.timer.doAfter(0.1, function()
+                windowWatcherPaused = false
+            end)
         end)
     else
         windowWatcherPaused = false
@@ -1027,8 +1050,11 @@ function WM:closeFocusedWindow()
     if colIdx > 1 then colIdx = colIdx - 1 end
     local nextWindowId = state.screens[screenId][spaceId].cols[colIdx][1]
     local nextWindow = getWindow(nextWindowId)
-    nextWindow:focus()
-    centerMouseInWindow(nextWindow)
+    focusWindow(nextWindow, function()
+        addToWindowStack(nextWindow)
+        bringIntoView(nextWindow)
+        centerMouseInWindow(nextWindow)
+    end)
 end
 
 function WM:scroll(direction, opts)
@@ -1097,6 +1123,7 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
         local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
         local nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
         if nextWindowId then
+            windowWatcherPaused = true
             local screenId, spaceId, _, _ = locateWindow(nextWindowId)
             if not screenId or not spaceId then return end
             local currentSpaceId = state.activeSpaceForScreen[screenId]
@@ -1106,8 +1133,12 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
             end
             local nextWindow = getWindow(nextWindowId)
             focusWindow(nextWindow, function()
+                addToWindowStack(nextWindow)
                 bringIntoView(nextWindow)
                 centerMouseInWindow(nextWindow)
+                hs.timer.doAfter(0.1, function()
+                    windowWatcherPaused = false
+                end)
             end)
             return
         end
@@ -1152,6 +1183,7 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
             table.insert(state.screens[targetScreenId][targetSpaceId].cols, targetColIdx, { newWindow:id() })
             retile(state, targetScreenId, targetSpaceId)
             focusWindow(newWindow, function()
+                addToWindowStack(newWindow)
                 centerMouseInWindow(newWindow)
                 hs.timer.doAfter(0.1, function()
                     windowWatcherPaused = false
@@ -1188,6 +1220,64 @@ function WM:init()
     state.fullscreenOriginalWidth = savedState.fullscreenOriginalWidth or state.fullscreenOriginalWidth
     state.activeSpaceForScreen = savedState.activeSpaceForScreen or state.activeSpaceForScreen
     state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or state.startXForScreenAndSpace
+
+    -- Move spaces that belonged to monitors which are no longer connected onto the
+    -- first currently-connected screen. This preserves the layout of those
+    -- spaces between reloads instead of discarding them.
+    do
+        -- Build a set of screen ids that are actually present right now
+        local connectedScreens = {}
+        local availableScreens = Screen.allScreens()
+        for _, scr in ipairs(availableScreens) do
+            connectedScreens[scr:id()] = true
+        end
+
+        -- If there is at least one screen connected, use the first one as the
+        -- destination for any orphaned spaces.
+        local firstScreen = availableScreens[1]
+        if firstScreen then
+            local targetScreenId = firstScreen:id()
+
+            -- Ensure the target screen has tables ready to receive moved data
+            savedState.screens[targetScreenId] = savedState.screens[targetScreenId] or {}
+            savedState.startXForScreenAndSpace = savedState.startXForScreenAndSpace or {}
+            savedState.startXForScreenAndSpace[targetScreenId] = savedState.startXForScreenAndSpace[targetScreenId] or {}
+
+            -- Identify screens present in the saved state that are no longer connected
+            local orphanedScreenIds = {}
+            for savedScreenId, _ in pairs(savedState.screens) do
+                if not connectedScreens[savedScreenId] then
+                    table.insert(orphanedScreenIds, savedScreenId)
+                end
+            end
+
+            -- Re-home each orphaned screen's spaces onto the target screen
+            for _, orphanId in ipairs(orphanedScreenIds) do
+                local orphanSpaces = savedState.screens[orphanId]
+                for spaceId, spaceData in pairs(orphanSpaces) do
+                    -- Find the first unused space slot (1-9) on the target screen
+                    local destSpaceId = nil
+                    for i = 1, 9 do
+                        local existing = savedState.screens[targetScreenId][i]
+                        if not existing or (#(existing.cols or {}) == 0 and #(existing.floating or {}) == 0) then
+                            destSpaceId = i
+                            break
+                        end
+                    end
+                    -- If we found an open slot, move the space data and its stored X offset
+                    if destSpaceId then
+                        savedState.screens[targetScreenId][destSpaceId] = spaceData
+                        if savedState.startXForScreenAndSpace[orphanId] and savedState.startXForScreenAndSpace[orphanId][spaceId] ~= nil then
+                            savedState.startXForScreenAndSpace[targetScreenId][destSpaceId] = savedState.startXForScreenAndSpace[orphanId][spaceId]
+                        end
+                    end
+                end
+                -- Remove the orphaned screen so we do not reference it later
+                savedState.screens[orphanId] = nil
+                savedState.startXForScreenAndSpace[orphanId] = nil
+            end
+        end
+    end
 
     local placements = {} -- window:id() -> { screenId, spaceId, colIdx, rowIdx, isFloating }
     for _, screen in ipairs(Screen.allScreens()) do
