@@ -128,9 +128,9 @@ hs.hotkey.bind({ "cmd", "ctrl", "alt" }, "4", function()
 	WM:moveFocusedWindowToSpace(4)
 end)
 
--- Space Chooser (fuzzy finder for all spaces) --
+-- Command Palette (fuzzy finder for commands and spaces) --
 hs.hotkey.bind({ "cmd", "ctrl" }, "`", function()
-	WM:showSpaceChooser()
+	WM:showCommandPalette()
 end)
 
 -- App Launcher Shortcuts --

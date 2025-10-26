@@ -41,6 +41,9 @@ local state = {
 	fullscreenOriginalWidth = {},
 }
 
+-- Command palette state (not persisted)
+local commandPaletteMode = "root" -- "root" or "moveWindowToSpace"
+
 --[[
 
 This is a PaperWM style scrolling window manager.
@@ -388,7 +391,8 @@ end
 local function retile(state, screenId, spaceId, opts)
 	opts = opts or {}
 
-	local focusedWindowId = Window.focusedWindow():id()
+	local focusedWindow = Window.focusedWindow()
+	local focusedWindowId = focusedWindow and focusedWindow:id() or nil
 	local cols = state.screens[screenId][spaceId].cols
 	local screen = Screen(screenId)
 	if not cols or #cols == 0 then
@@ -659,7 +663,8 @@ local function retileAll(opts)
 	end
 end
 
-local function buildSpaceChoices(query)
+-- Helper: Build space list for switching or moving
+local function buildSpaceList(query, actionType)
 	local choices = {}
 	query = query or ""
 
@@ -669,13 +674,24 @@ local function buildSpaceChoices(query)
 		return a:frame().x < b:frame().x
 	end)
 
-	-- Check if query matches an existing space
+	-- Check if query matches an existing space (that has windows)
 	local queryMatchesExisting = false
 	if query ~= "" then
-		-- Check if query is a numbered space 1-4
+		-- Check if query is a numbered space
 		local queryNum = tonumber(query)
-		if queryNum and queryNum >= 1 and queryNum <= 4 then
-			queryMatchesExisting = true
+		if queryNum then
+			-- Check if this numbered space exists on any screen and has windows
+			for _, screen in ipairs(screens) do
+				local screenId = screen:id()
+				if state.screens[screenId] and state.screens[screenId][queryNum] then
+					local space = state.screens[screenId][queryNum]
+					local hasWindows = (space.cols and #space.cols > 0) or (space.floating and #space.floating > 0)
+					if hasWindows then
+						queryMatchesExisting = true
+						break
+					end
+				end
+			end
 		else
 			-- Check if query matches any named space
 			for _, screen in ipairs(screens) do
@@ -688,15 +704,15 @@ local function buildSpaceChoices(query)
 		end
 	end
 
-	-- Add "Create space" option if query doesn't match and isn't empty
-	if query ~= "" and not queryMatchesExisting then
+	-- Add "Create space" option if query doesn't match and isn't empty (only for switchSpace action)
+	if actionType == "switchSpace" and query ~= "" and not queryMatchesExisting then
 		local currentScreen = Mouse.getCurrentScreen()
 		table.insert(choices, {
 			text = "+ Create space: " .. query,
-			subText = "Create new named space",
+			subText = "Create new named space and switch to it",
 			screenId = currentScreen:id(),
 			spaceId = query,
-			isCreateAction = true,
+			actionType = "createAndSwitchSpace",
 		})
 	end
 
@@ -708,11 +724,6 @@ local function buildSpaceChoices(query)
 		-- Iterate all spaces on this screen (both numbered and named)
 		if state.screens[screenId] then
 			for spaceId, space in pairs(state.screens[screenId]) do
-				-- Skip numbered spaces 5-9 (only show 1-4 which have hotkeys)
-				if type(spaceId) == "number" and spaceId > 4 then
-					goto continue
-				end
-
 				-- Count windows in this space
 				local windowCount = 0
 				if space.cols then
@@ -722,6 +733,11 @@ local function buildSpaceChoices(query)
 				end
 				if space.floating then
 					windowCount = windowCount + #space.floating
+				end
+
+				-- Only show spaces that have windows
+				if windowCount == 0 then
+					goto continue
 				end
 
 				-- Build display text
@@ -760,6 +776,7 @@ local function buildSpaceChoices(query)
 					screenId = screenId,
 					spaceId = spaceId,
 					isCurrent = isCurrent,
+					actionType = actionType,
 				})
 
 				::continue::
@@ -774,14 +791,13 @@ local function buildSpaceChoices(query)
 
 		for _, choice in ipairs(choices) do
 			-- Always include the create action
-			if choice.isCreateAction then
+			if choice.actionType == "createAndSwitchSpace" then
 				table.insert(filtered, choice)
 			else
-				-- Simple fuzzy match: check if all query characters appear in order
+				-- Simple fuzzy match: check if query matches text or subtext
 				local text = string.lower(choice.text)
 				local subText = choice.subText and string.lower(choice.subText) or ""
 
-				-- Check if query matches text or subtext
 				if text:find(lowerQuery, 1, true) or subText:find(lowerQuery, 1, true) then
 					table.insert(filtered, choice)
 				end
@@ -793,8 +809,8 @@ local function buildSpaceChoices(query)
 	-- Sort: current space first, then by screen, then by spaceId
 	table.sort(choices, function(a, b)
 		-- Create action always comes first
-		if a.isCreateAction ~= b.isCreateAction then
-			return a.isCreateAction
+		if (a.actionType == "createAndSwitchSpace") ~= (b.actionType == "createAndSwitchSpace") then
+			return a.actionType == "createAndSwitchSpace"
 		end
 		if a.isCurrent ~= b.isCurrent then
 			return a.isCurrent -- current space first
@@ -812,6 +828,32 @@ local function buildSpaceChoices(query)
 	end)
 
 	return choices
+end
+
+local function buildCommandPaletteChoices(query)
+	query = query or ""
+
+	if commandPaletteMode == "root" then
+		-- Root menu: show spaces directly for switching, plus "Move window to space" command
+		local choices = buildSpaceList(query, "switchSpace")
+
+		-- Add "Move window to space" command at the bottom (less common action)
+		table.insert(choices, {
+			text = "Move window to space",
+			subText = "Move focused window to another space",
+			actionType = "navigateToMoveWindow",
+			valid = false, -- Don't close chooser when selected
+		})
+
+		return choices
+	elseif commandPaletteMode == "moveWindowToSpace" then
+		-- Show space list with "move window to space" action
+		local choices = buildSpaceList(query, "moveWindowToSpace")
+
+		return choices
+	end
+
+	return {}
 end
 
 local function updateMenubar()
@@ -862,16 +904,19 @@ local function updateMenubar()
 	WM._menubar:setMenu(menu)
 end
 
-function WM:showSpaceChooser()
-	if not WM._spaceChooser then
+function WM:showCommandPalette()
+	if not WM._commandPalette then
 		return
 	end
 
+	-- Reset to root mode
+	commandPaletteMode = "root"
+
 	-- Refresh choices when showing
-	local choices = buildSpaceChoices()
-	WM._spaceChooser:choices(choices)
-	WM._spaceChooser:query("") -- Clear search text from previous invocation
-	WM._spaceChooser:show()
+	local choices = buildCommandPaletteChoices()
+	WM._commandPalette:choices(choices)
+	WM._commandPalette:query("") -- Clear search text from previous invocation
+	WM._commandPalette:show()
 end
 
 local function getWindowStackIndex(winId)
@@ -1114,7 +1159,11 @@ end
 
 function WM:focusDirection(direction)
 	windowWatcherPaused = true
-	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(Window.focusedWindow():id())
+	local focusedWindow = Window.focusedWindow()
+	if not focusedWindow then
+		return
+	end
+	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(focusedWindow:id())
 
 	if not currentColIdx then
 		return
@@ -1167,7 +1216,11 @@ function WM:focusDirection(direction)
 end
 
 function WM:moveDirection(direction)
-	local currentScreenId, currentSpace, currentColIdx, _ = locateWindow(Window.focusedWindow():id())
+	local focusedWindow = Window.focusedWindow()
+	if not focusedWindow then
+		return
+	end
+	local currentScreenId, currentSpace, currentColIdx, _ = locateWindow(focusedWindow:id())
 	local nextColIdx = nil
 
 	if not currentColIdx then
@@ -1227,6 +1280,9 @@ end
 
 function WM:moveWindowToNextScreen()
 	local currentWindow = Window.focusedWindow()
+	if not currentWindow then
+		return
+	end
 	local currentWindowId = currentWindow:id()
 	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(currentWindowId)
 	local nextScreenId = currentWindow:screen():next():id()
@@ -1471,7 +1527,12 @@ function WM:switchToSpace(spaceId)
 			end)
 		end)
 	else
-		windowWatcherPaused = false
+		-- When switching to an empty space, delay re-enabling the watcher
+		-- to prevent macOS from auto-focusing a window on another space and
+		-- triggering an unwanted space switch back
+		hs.timer.doAfter(0.2, function()
+			windowWatcherPaused = false
+		end)
 	end
 end
 
@@ -1610,10 +1671,10 @@ end
 
 function WM:closeFocusedWindow()
 	local win = Window.focusedWindow()
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
 	if not win then
 		return
 	end
+	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
 	win:close()
 	if not screenId or not spaceId or not colIdx or not rowIdx then
 		return
@@ -1934,6 +1995,17 @@ function WM:init()
 					spaceId = placed.spaceId
 					colIdx = placed.colIdx
 					rowIdx = placed.rowIdx
+
+					-- Ensure the space exists (might be a named space not initialized in the loop above)
+					if not state.screens[screenId] then
+						state.screens[screenId] = {}
+					end
+					if not state.screens[screenId][spaceId] then
+						state.screens[screenId][spaceId] = { cols = {}, floating = {} }
+						state.startXForScreenAndSpace[screenId] = state.startXForScreenAndSpace[screenId] or {}
+						state.startXForScreenAndSpace[screenId][spaceId] = 0
+					end
+
 					state.screens[screenId][spaceId].cols[colIdx] = state.screens[screenId][spaceId].cols[colIdx] or {}
 					state.screens[screenId][spaceId].cols[colIdx][rowIdx] = win:id()
 				else
@@ -1968,40 +2040,87 @@ function WM:init()
 	WM._menubar = hs.menubar.new()
 	updateMenubar()
 
-	-- Create space chooser (fuzzy finder for switching spaces)
-	WM._spaceChooser = hs.chooser.new(function(choice)
+	-- Create command palette (fuzzy finder for commands and spaces)
+	WM._commandPalette = hs.chooser.new(function(choice)
 		if not choice then
 			return -- Dismissed without selection
 		end
 
+		-- Handle space actions (final actions that close the palette)
+		local actionType = choice.actionType
 		local targetScreenId = choice.screenId
 		local targetSpaceId = choice.spaceId
 
-		-- Handle create action
-		if choice.isCreateAction then
+		if actionType == "createAndSwitchSpace" then
 			-- Create the new space
 			WM:createSpace(targetSpaceId, targetScreenId)
+
+			-- If different screen, move mouse there first
+			local currentScreen = Mouse.getCurrentScreen()
+			if currentScreen:id() ~= targetScreenId then
+				local targetScreen = Screen(targetScreenId)
+				local frame = targetScreen:frame()
+				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
+			end
+
+			-- Switch to the space
+			WM:switchToSpace(targetSpaceId)
+		elseif actionType == "switchSpace" then
+			-- If different screen, move mouse there first
+			local currentScreen = Mouse.getCurrentScreen()
+			if currentScreen:id() ~= targetScreenId then
+				local targetScreen = Screen(targetScreenId)
+				local frame = targetScreen:frame()
+				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
+			end
+
+			-- Switch to the space
+			WM:switchToSpace(targetSpaceId)
+		elseif actionType == "moveWindowToSpace" then
+			-- Move focused window to the selected space
+			WM:moveFocusedWindowToSpace(targetSpaceId)
+		end
+	end)
+
+	-- Handle invalid choices (valid=false) - keeps chooser open for navigation
+	WM._commandPalette:invalidCallback(function(choice)
+		if not choice then
+			return
 		end
 
-		-- If different screen, move mouse there first
-		local currentScreen = Mouse.getCurrentScreen()
-		if currentScreen:id() ~= targetScreenId then
-			local targetScreen = Screen(targetScreenId)
-			local frame = targetScreen:frame()
-			Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
-		end
+		local actionType = choice.actionType
 
-		-- Switch to the space
-		WM:switchToSpace(targetSpaceId)
+		-- Handle navigation actions (switch modes without closing)
+		if actionType == "navigateToMoveWindow" then
+			print("[commandPalette] Navigating to moveWindowToSpace mode")
+			commandPaletteMode = "moveWindowToSpace"
+			WM._commandPalette:query("")
+			local choices = buildCommandPaletteChoices()
+			WM._commandPalette:choices(choices)
+		end
 	end)
 
 	-- Disable built-in filtering since we handle it in queryChangedCallback
-	WM._spaceChooser:queryChangedCallback(function(query)
-		local choices = buildSpaceChoices(query)
-		WM._spaceChooser:choices(choices)
+	WM._commandPalette:queryChangedCallback(function(query)
+		local choices = buildCommandPaletteChoices(query)
+		WM._commandPalette:choices(choices)
 	end)
 
 	addToWindowStack(Window.focusedWindow())
+
+	-- Watch for screen configuration changes (connect/disconnect)
+	WM._screenWatcher = hs.screen.watcher.new(function()
+		print("[screenWatcher] Screen configuration changed, reinitializing WM...")
+
+		-- Save current state before reinitializing
+		saveState()
+
+		-- Reinitialize to handle new screen configuration
+		WM:init()
+
+		print("[screenWatcher] Reinitialization complete")
+	end)
+	WM._screenWatcher:start()
 end
 
 hs.hotkey.bind({ "cmd", "ctrl" }, "t", function()
