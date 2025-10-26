@@ -659,6 +659,79 @@ local function retileAll(opts)
 	end
 end
 
+local function buildSpaceChoices()
+	local choices = {}
+
+	-- Get all screens sorted by x position (left to right)
+	local screens = Screen.allScreens()
+	table.sort(screens, function(a, b)
+		return a:frame().x < b:frame().x
+	end)
+
+	-- Build choices for each screen's spaces
+	for screenIdx, screen in ipairs(screens) do
+		local screenId = screen:id()
+		local activeSpaceId = state.activeSpaceForScreen[screenId]
+
+		-- Iterate all spaces on this screen (both numbered and named)
+		if state.screens[screenId] then
+			for spaceId, space in pairs(state.screens[screenId]) do
+				-- Count windows in this space
+				local windowCount = 0
+				if space.cols then
+					for _, col in ipairs(space.cols) do
+						windowCount = windowCount + #col
+					end
+				end
+				if space.floating then
+					windowCount = windowCount + #space.floating
+				end
+
+				-- Build display text
+				local text
+				if type(spaceId) == "string" then
+					text = spaceId -- Named space: show the name
+				else
+					text = "Space " .. spaceId -- Numbered space
+				end
+
+				-- Build subtext with screen info and window count
+				local screenName = "Screen " .. screenIdx
+				local windowText = windowCount .. " window" .. (windowCount ~= 1 and "s" or "")
+				local isCurrent = (spaceId == activeSpaceId)
+				local subText = screenName .. " · " .. windowText .. (isCurrent and " · (current)" or "")
+
+				table.insert(choices, {
+					text = text,
+					subText = subText,
+					screenId = screenId,
+					spaceId = spaceId,
+					isCurrent = isCurrent,
+				})
+			end
+		end
+	end
+
+	-- Sort: current space first, then by screen, then by spaceId
+	table.sort(choices, function(a, b)
+		if a.isCurrent ~= b.isCurrent then
+			return a.isCurrent -- current space first
+		end
+		if a.screenId ~= b.screenId then
+			return a.screenId < b.screenId
+		end
+		-- Sort spaceIds: numbers before strings, then alphabetically
+		local aIsNum = type(a.spaceId) == "number"
+		local bIsNum = type(b.spaceId) == "number"
+		if aIsNum ~= bIsNum then
+			return aIsNum -- numbers before strings
+		end
+		return tostring(a.spaceId) < tostring(b.spaceId)
+	end)
+
+	return choices
+end
+
 local function updateMenubar()
 	if not WM._menubar then
 		return
@@ -675,7 +748,14 @@ local function updateMenubar()
 	for _, screen in ipairs(screens) do
 		local screenId = screen:id()
 		local spaceId = state.activeSpaceForScreen[screenId] or 1
-		table.insert(titleParts, tostring(spaceId))
+		-- For named spaces, show abbreviated name or first 3 chars
+		local displayText
+		if type(spaceId) == "string" then
+			displayText = string.sub(spaceId, 1, 3)
+		else
+			displayText = tostring(spaceId)
+		end
+		table.insert(titleParts, displayText)
 	end
 	local title = table.concat(titleParts, "|")
 
@@ -698,6 +778,17 @@ local function updateMenubar()
 
 	WM._menubar:setTitle(title)
 	WM._menubar:setMenu(menu)
+end
+
+function WM:showSpaceChooser()
+	if not WM._spaceChooser then
+		return
+	end
+
+	-- Refresh choices when showing
+	local choices = buildSpaceChoices()
+	WM._spaceChooser:choices(choices)
+	WM._spaceChooser:show()
 end
 
 local function getWindowStackIndex(winId)
@@ -821,6 +912,23 @@ WM._windowWatcher:subscribe(hs.window.filter.windowDestroyed, function(win, appN
 	end
 	if #col == 0 then
 		table.remove(state.screens[screenId][spaceId].cols, colIdx)
+	end
+
+	-- Auto-cleanup empty named spaces (but preserve numbered spaces 1-4)
+	local space = state.screens[screenId][spaceId]
+	local isEmptySpace = space and #space.cols == 0 and (not space.floating or #space.floating == 0)
+	local isNamedSpace = type(spaceId) == "string"
+
+	if isEmptySpace and isNamedSpace then
+		print("[windowDestroyed]", "Cleaning up empty named space:", spaceId)
+		state.screens[screenId][spaceId] = nil
+		state.startXForScreenAndSpace[screenId][spaceId] = nil
+
+		-- If this was the active space, switch to space 1
+		if state.activeSpaceForScreen[screenId] == spaceId then
+			state.activeSpaceForScreen[screenId] = 1
+			updateMenubar()
+		end
 	end
 
 	-- Clean up the window stack to remove any now-invalid windows
@@ -1439,6 +1547,24 @@ function WM:closeFocusedWindow()
 	end)
 end
 
+function WM:createSpace(spaceId, screenId)
+	-- Default to current screen if not specified
+	screenId = screenId or Mouse.getCurrentScreen():id()
+
+	-- Initialize screen if needed
+	state.screens[screenId] = state.screens[screenId] or {}
+	state.startXForScreenAndSpace[screenId] = state.startXForScreenAndSpace[screenId] or {}
+
+	-- Initialize space if it doesn't exist
+	if not state.screens[screenId][spaceId] then
+		state.screens[screenId][spaceId] = { cols = {}, floating = {} }
+		state.startXForScreenAndSpace[screenId][spaceId] = 0
+		print("[createSpace]", "Created space:", spaceId, "on screen:", screenId)
+	end
+
+	return spaceId
+end
+
 function WM:scroll(direction, opts)
 	local ignoreApps = opts.ignoreApps or {}
 	local win = Window.focusedWindow()
@@ -1758,6 +1884,31 @@ function WM:init()
 	-- Create menubar space indicator
 	WM._menubar = hs.menubar.new()
 	updateMenubar()
+
+	-- Create space chooser (fuzzy finder for switching spaces)
+	WM._spaceChooser = hs.chooser.new(function(choice)
+		if not choice then
+			return -- Dismissed without selection
+		end
+
+		-- Switch to the selected space
+		local targetScreenId = choice.screenId
+		local targetSpaceId = choice.spaceId
+
+		-- If different screen, move mouse there first
+		local currentScreen = Mouse.getCurrentScreen()
+		if currentScreen:id() ~= targetScreenId then
+			local targetScreen = Screen(targetScreenId)
+			local frame = targetScreen:frame()
+			Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
+		end
+
+		-- Switch to the space
+		WM:switchToSpace(targetSpaceId)
+	end)
+
+	WM._spaceChooser:searchSubText(true) -- Enable searching in subtext
+	WM._spaceChooser:placeholder("Search spaces...")
 
 	addToWindowStack(Window.focusedWindow())
 end
