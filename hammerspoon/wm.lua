@@ -660,8 +660,8 @@ local function retileAll(opts)
 end
 
 local function buildSpaceChoices(query)
-	query = query or ""
 	local choices = {}
+	query = query or ""
 
 	-- Get all screens sorted by x position (left to right)
 	local screens = Screen.allScreens()
@@ -669,8 +669,36 @@ local function buildSpaceChoices(query)
 		return a:frame().x < b:frame().x
 	end)
 
-	-- Track if query matches any existing space
+	-- Check if query matches an existing space
 	local queryMatchesExisting = false
+	if query ~= "" then
+		-- Check if query is a numbered space 1-4
+		local queryNum = tonumber(query)
+		if queryNum and queryNum >= 1 and queryNum <= 4 then
+			queryMatchesExisting = true
+		else
+			-- Check if query matches any named space
+			for _, screen in ipairs(screens) do
+				local screenId = screen:id()
+				if state.screens[screenId] and state.screens[screenId][query] then
+					queryMatchesExisting = true
+					break
+				end
+			end
+		end
+	end
+
+	-- Add "Create space" option if query doesn't match and isn't empty
+	if query ~= "" and not queryMatchesExisting then
+		local currentScreen = Mouse.getCurrentScreen()
+		table.insert(choices, {
+			text = "+ Create space: " .. query,
+			subText = "Create new named space",
+			screenId = currentScreen:id(),
+			spaceId = query,
+			isCreateAction = true,
+		})
+	end
 
 	-- Build choices for each screen's spaces
 	for screenIdx, screen in ipairs(screens) do
@@ -726,15 +754,6 @@ local function buildSpaceChoices(query)
 					subText = table.concat(parts, " · ")
 				end
 
-				-- Check if this space matches the query
-				if query ~= "" then
-					local lowerQuery = string.lower(query)
-					local lowerSpaceId = string.lower(tostring(spaceId))
-					if lowerQuery == lowerSpaceId or lowerSpaceId:find(lowerQuery, 1, true) then
-						queryMatchesExisting = true
-					end
-				end
-
 				table.insert(choices, {
 					text = text,
 					subText = subText,
@@ -764,25 +783,6 @@ local function buildSpaceChoices(query)
 		end
 		return tostring(a.spaceId) < tostring(b.spaceId)
 	end)
-
-	-- Add "Create space" option if query doesn't match any existing space
-	if query ~= "" and not queryMatchesExisting then
-		local trimmedQuery = query:match("^%s*(.-)%s*$") -- Trim whitespace
-
-		-- Don't offer to create numbered spaces 1-4 (reserved) or empty names
-		local isReservedNumber = trimmedQuery == "1" or trimmedQuery == "2" or trimmedQuery == "3" or trimmedQuery == "4"
-
-		if trimmedQuery ~= "" and not isReservedNumber then
-			table.insert(choices, {
-				text = "Create space: " .. trimmedQuery,
-				subText = "Create a new named space",
-				screenId = nil,
-				spaceId = trimmedQuery,
-				isCurrent = false,
-				isCreateAction = true,
-			})
-		end
-	end
 
 	return choices
 end
@@ -840,9 +840,10 @@ function WM:showSpaceChooser()
 		return
 	end
 
-	-- Clear search text and refresh choices
-	WM._spaceChooserQuery = ""
-	WM._spaceChooser:query("") -- This will trigger queryChangedCallback which updates choices
+	-- Refresh choices when showing
+	local choices = buildSpaceChoices()
+	WM._spaceChooser:choices(choices)
+	WM._spaceChooser:query("") -- Clear search text from previous invocation
 	WM._spaceChooser:show()
 end
 
@@ -886,7 +887,6 @@ end
 local windowWatcherPaused = false
 WM._windowWatcher = hs.window.filter.new()
 WM._menubar = nil
-WM._spaceChooserQuery = ""
 
 WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appName, event)
 	if windowWatcherPaused then
@@ -1947,31 +1947,14 @@ function WM:init()
 			return -- Dismissed without selection
 		end
 
-		-- Handle "Create space" action
-		if choice.isCreateAction then
-			local spaceName = choice.spaceId
-
-			-- Show confirmation dialog
-			local buttonPressed = hs.dialog.blockAlert(
-				"Create New Space",
-				"Create new space '" .. spaceName .. "'?",
-				"Create",
-				"Cancel"
-			)
-
-			if buttonPressed == "Create" then
-				-- Create the space and switch to it
-				local screenId = Mouse.getCurrentScreen():id()
-				WM:createSpace(spaceName, screenId)
-				WM:switchToSpace(spaceName)
-			end
-
-			return
-		end
-
-		-- Switch to the selected space
 		local targetScreenId = choice.screenId
 		local targetSpaceId = choice.spaceId
+
+		-- Handle create action
+		if choice.isCreateAction then
+			-- Create the new space
+			WM:createSpace(targetSpaceId, targetScreenId)
+		end
 
 		-- If different screen, move mouse there first
 		local currentScreen = Mouse.getCurrentScreen()
@@ -1987,9 +1970,8 @@ function WM:init()
 
 	WM._spaceChooser:searchSubText(true) -- Enable searching in subtext
 
-	-- Track query changes to dynamically update "Create space" option
+	-- Add query changed callback to dynamically update choices with "create" option
 	WM._spaceChooser:queryChangedCallback(function(query)
-		WM._spaceChooserQuery = query
 		local choices = buildSpaceChoices(query)
 		WM._spaceChooser:choices(choices)
 	end)
