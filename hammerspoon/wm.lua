@@ -767,8 +767,35 @@ local function buildSpaceChoices(query)
 		end
 	end
 
+	-- Filter choices based on query (simple fuzzy matching)
+	if query ~= "" then
+		local filtered = {}
+		local lowerQuery = string.lower(query)
+
+		for _, choice in ipairs(choices) do
+			-- Always include the create action
+			if choice.isCreateAction then
+				table.insert(filtered, choice)
+			else
+				-- Simple fuzzy match: check if all query characters appear in order
+				local text = string.lower(choice.text)
+				local subText = choice.subText and string.lower(choice.subText) or ""
+
+				-- Check if query matches text or subtext
+				if text:find(lowerQuery, 1, true) or subText:find(lowerQuery, 1, true) then
+					table.insert(filtered, choice)
+				end
+			end
+		end
+		choices = filtered
+	end
+
 	-- Sort: current space first, then by screen, then by spaceId
 	table.sort(choices, function(a, b)
+		-- Create action always comes first
+		if a.isCreateAction ~= b.isCreateAction then
+			return a.isCreateAction
+		end
 		if a.isCurrent ~= b.isCurrent then
 			return a.isCurrent -- current space first
 		end
@@ -1968,9 +1995,7 @@ function WM:init()
 		WM:switchToSpace(targetSpaceId)
 	end)
 
-	WM._spaceChooser:searchSubText(true) -- Enable searching in subtext
-
-	-- Add query changed callback to dynamically update choices with "create" option
+	-- Disable built-in filtering since we handle it in queryChangedCallback
 	WM._spaceChooser:queryChangedCallback(function(query)
 		local choices = buildSpaceChoices(query)
 		WM._spaceChooser:choices(choices)
