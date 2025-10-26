@@ -1908,7 +1908,6 @@ function WM:init()
 	end)
 
 	WM._spaceChooser:searchSubText(true) -- Enable searching in subtext
-	WM._spaceChooser:placeholder("Search spaces...")
 
 	addToWindowStack(Window.focusedWindow())
 end
