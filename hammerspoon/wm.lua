@@ -695,21 +695,31 @@ local function buildSpaceChoices()
 				-- Build display text
 				local text
 				local subText
+				local isCurrent = (spaceId == activeSpaceId)
+				local hasMultipleScreens = #screens > 1
+
 				if type(spaceId) == "string" then
 					text = spaceId -- Named space: show the name
-					-- Build subtext with screen info and window count
-					local screenName = "Screen " .. screenIdx
-					local windowText = windowCount .. " window" .. (windowCount ~= 1 and "s" or "")
-					local isCurrent = (spaceId == activeSpaceId)
-					subText = screenName .. " · " .. windowText .. (isCurrent and " · (current)" or "")
+					-- Build subtext: only show screen if multiple screens, and current marker
+					local parts = {}
+					if hasMultipleScreens then
+						table.insert(parts, "Screen " .. screenIdx)
+					end
+					if isCurrent then
+						table.insert(parts, "(current)")
+					end
+					subText = table.concat(parts, " · ")
 				else
 					text = tostring(spaceId) -- Just the number: "1", "2", "3", "4"
-					-- Build subtext with "Space N" prefix, screen info and window count
-					local spaceName = "Space " .. spaceId
-					local screenName = "Screen " .. screenIdx
-					local windowText = windowCount .. " window" .. (windowCount ~= 1 and "s" or "")
-					local isCurrent = (spaceId == activeSpaceId)
-					subText = spaceName .. " · " .. screenName .. " · " .. windowText .. (isCurrent and " · (current)" or "")
+					-- Build subtext: "Space N" + optional screen + optional current marker
+					local parts = { "Space " .. spaceId }
+					if hasMultipleScreens then
+						table.insert(parts, "Screen " .. screenIdx)
+					end
+					if isCurrent then
+						table.insert(parts, "(current)")
+					end
+					subText = table.concat(parts, " · ")
 				end
 
 				table.insert(choices, {
