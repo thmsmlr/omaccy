@@ -828,21 +828,44 @@ function WM:navigateStack(direction)
 	--     print(string.format("%s [%d] %s", marker, i, title))
 	-- end
 
-	local screenId, spaceId, _, _ = locateWindow(winId)
+	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
 	if not screenId or not spaceId then
 		return
 	end
 	local currentSpaceId = state.activeSpaceForScreen[screenId]
-	if spaceId ~= currentSpaceId then
+	local switchingSpaces = (spaceId ~= currentSpaceId)
+
+	if switchingSpaces then
+		-- Calculate correct startX BEFORE switching spaces
+		local screenFrame = Screen(screenId):frame()
+
+		-- Calculate total width before the target window in the stack
+		local preWidth = 0
+		for i = 1, colIdx - 1 do
+			local preWinId = state.screens[screenId][spaceId].cols[i][1]
+			local w = getWindow(preWinId)
+			if w then
+				preWidth = preWidth + w:frame().w + WM.tileGap
+			end
+		end
+
+		-- Center the target window on screen
+		local targetX = (screenFrame.w - win:frame().w) / 2
+		local newStartX = targetX - preWidth
+		state.startXForScreenAndSpace[screenId][spaceId] = newStartX
+
+		-- Switch spaces with zero animation to avoid windows flying across screen
 		state.activeSpaceForScreen[screenId] = spaceId
-		-- Only retile the affected screen's spaces
 		moveSpaceWindowsOffscreen(screenId, currentSpaceId)
-		retile(state, screenId, spaceId)
+		retile(state, screenId, spaceId, { duration = 0 })
 	end
 
 	windowWatcherPaused = true
 	focusWindow(win, function()
-		bringIntoView(win)
+		-- Only bringIntoView if we're not switching spaces (already positioned correctly)
+		if not switchingSpaces then
+			bringIntoView(win)
+		end
 		centerMouseInWindow(win)
 		hs.timer.doAfter(0.1, function()
 			windowWatcherPaused = false
