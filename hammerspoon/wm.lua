@@ -676,6 +676,11 @@ local function buildSpaceChoices()
 		-- Iterate all spaces on this screen (both numbered and named)
 		if state.screens[screenId] then
 			for spaceId, space in pairs(state.screens[screenId]) do
+				-- Skip numbered spaces 5-9 (only show 1-4 which have hotkeys)
+				if type(spaceId) == "number" and spaceId > 4 then
+					goto continue
+				end
+
 				-- Count windows in this space
 				local windowCount = 0
 				if space.cols then
@@ -708,6 +713,8 @@ local function buildSpaceChoices()
 					spaceId = spaceId,
 					isCurrent = isCurrent,
 				})
+
+				::continue::
 			end
 		end
 	end
