@@ -1178,10 +1178,11 @@ function WM:switchToSpace(spaceId)
 	-- Since setFrame() doesn't change z-order, we can show new windows behind,
 	-- raise them to top, then clean up old windows (user doesn't see this)
 
-	-- Phase 1: Show new visible windows (appear behind old windows initially)
-	retile(state, screenId, spaceId, { duration = 0, onlyVisible = true })
+	-- Phase 1: Move ALL new space windows to their correct positions (not just visible)
+	-- This ensures correctness - all windows are positioned before we raise any
+	retile(state, screenId, spaceId, { duration = 0 })
 
-	-- Phase 2: Raise new visible windows to top (now they cover old windows)
+	-- Phase 2: Raise visible windows to top (now they cover old windows)
 	-- Use ONLY win:raise(), not app:activate(), to avoid raising ALL windows of that app
 	local screenFrame = Screen(screenId):frame()
 	local screenLeft = screenFrame.x
