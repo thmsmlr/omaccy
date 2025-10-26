@@ -694,17 +694,23 @@ local function buildSpaceChoices()
 
 				-- Build display text
 				local text
+				local subText
 				if type(spaceId) == "string" then
 					text = spaceId -- Named space: show the name
+					-- Build subtext with screen info and window count
+					local screenName = "Screen " .. screenIdx
+					local windowText = windowCount .. " window" .. (windowCount ~= 1 and "s" or "")
+					local isCurrent = (spaceId == activeSpaceId)
+					subText = screenName .. " · " .. windowText .. (isCurrent and " · (current)" or "")
 				else
-					text = "Space " .. spaceId -- Numbered space
+					text = tostring(spaceId) -- Just the number: "1", "2", "3", "4"
+					-- Build subtext with "Space N" prefix, screen info and window count
+					local spaceName = "Space " .. spaceId
+					local screenName = "Screen " .. screenIdx
+					local windowText = windowCount .. " window" .. (windowCount ~= 1 and "s" or "")
+					local isCurrent = (spaceId == activeSpaceId)
+					subText = spaceName .. " · " .. screenName .. " · " .. windowText .. (isCurrent and " · (current)" or "")
 				end
-
-				-- Build subtext with screen info and window count
-				local screenName = "Screen " .. screenIdx
-				local windowText = windowCount .. " window" .. (windowCount ~= 1 and "s" or "")
-				local isCurrent = (spaceId == activeSpaceId)
-				local subText = screenName .. " · " .. windowText .. (isCurrent and " · (current)" or "")
 
 				table.insert(choices, {
 					text = text,
