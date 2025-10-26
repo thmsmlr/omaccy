@@ -2043,7 +2043,11 @@ function WM:init()
 	-- Create command palette (fuzzy finder for commands and spaces)
 	WM._commandPalette = hs.chooser.new(function(choice)
 		if not choice then
-			return -- Dismissed without selection
+			-- Reset to root mode when dismissed
+			commandPaletteMode = "root"
+			-- Explicitly hide the chooser
+			WM._commandPalette:hide()
+			return
 		end
 
 		-- Handle space actions (final actions that close the palette)
@@ -2080,6 +2084,9 @@ function WM:init()
 			-- Move focused window to the selected space
 			WM:moveFocusedWindowToSpace(targetSpaceId)
 		end
+
+		-- Reset to root mode after completing an action
+		commandPaletteMode = "root"
 	end)
 
 	-- Handle invalid choices (valid=false) - keeps chooser open for navigation
@@ -2106,6 +2113,9 @@ function WM:init()
 		WM._commandPalette:choices(choices)
 	end)
 
+	-- Set background color to make the chooser more visible
+	WM._commandPalette:bgDark(true)
+
 	addToWindowStack(Window.focusedWindow())
 
 	-- Watch for screen configuration changes (connect/disconnect)
@@ -2113,7 +2123,7 @@ function WM:init()
 		print("[screenWatcher] Screen configuration changed, reinitializing WM...")
 
 		-- Save current state before reinitializing
-		saveState()
+		WM:saveState()
 
 		-- Reinitialize to handle new screen configuration
 		WM:init()
