@@ -155,14 +155,6 @@ Other TODOs:
 
 local addToWindowStack
 
-local function getScreenFrame(screenId)
-	local screen = Screen(screenId)
-	if not screen then
-		return nil
-	end
-	return screen:frame()
-end
-
 local function flatten(tbl)
 	local result = {}
 	for _, sublist in ipairs(tbl) do
@@ -271,10 +263,7 @@ local function updateZOrder(cols, focusedWindowId)
 	if not focusedColIdx or not screenId then
 		return
 	end
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 
 	-- Build desired front-to-back order
 	local ordered = {}
@@ -406,10 +395,6 @@ local function retile(state, screenId, spaceId, opts)
 	local focusedWindowId = focusedWindow and focusedWindow:id() or nil
 	local cols = state.screens[screenId][spaceId].cols
 	local screen = Screen(screenId)
-	if not screen then
-		-- Screen is disconnected, skip retiling
-		return
-	end
 	if not cols or #cols == 0 then
 		return
 	end
@@ -534,15 +519,7 @@ local function bringIntoView(win)
 		return
 	end
 	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	if not screenId then
-		return
-	end
-	local screen = Screen(screenId)
-	if not screen then
-		-- Screen is disconnected
-		return
-	end
-	local screenFrame = screen:frame()
+	local screenFrame = Screen(screenId):frame()
 
 	-- Total width (plus gaps) before the target window in the stack
 	local preWidth = 0
@@ -624,10 +601,7 @@ local function moveSpaceWindowsOffscreen(screenId, spaceId, opts)
 	local rightmostScreen = getRightmostScreen()
 	local rightFrame = rightmostScreen:frame()
 	local offscreenX = rightFrame.x + rightFrame.w - 1 -- leave 1px visible so macOS doesn't move it
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 	local screenLeft = screenFrame.x
 	local screenRight = screenFrame.x + screenFrame.w
 
@@ -1144,10 +1118,7 @@ function WM:navigateStack(direction)
 
 	if switchingSpaces then
 		-- Calculate correct startX BEFORE switching spaces
-		local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+		local screenFrame = Screen(screenId):frame()
 
 		-- Calculate total width before the target window in the stack
 		local preWidth = 0
@@ -1362,10 +1333,7 @@ function WM:centerWindow()
 		return
 	end
 	local screenId, spaceId, colIdx, _ = locateWindow(win:id())
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 
 	local preWidth = 0
 	for i = 1, colIdx - 1 do
@@ -1423,10 +1391,7 @@ function WM:resizeFocusedWindowVertically(delta)
 	end
 
 	local n = #col
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 	local minHeight = 50
 	local totalColHeight = screenFrame.h - WM.tileGap * (n - 1)
 
@@ -1514,10 +1479,7 @@ function WM:switchToSpace(spaceId)
 
 	-- Phase 2: Raise visible windows to top (now they cover old windows)
 	-- Use ONLY win:raise(), not app:activate(), to avoid raising ALL windows of that app
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 	local screenLeft = screenFrame.x
 	local screenRight = screenFrame.x + screenFrame.w
 
@@ -1601,10 +1563,7 @@ function WM:slurp()
 
 	-- Make all windows in the slurped column have the same height
 	-- We'll set their heights to be equal, dividing the column height equally
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 	local col = cols[colIdx]
 	local n = #col
 	if n > 0 then
@@ -1655,10 +1614,7 @@ function WM:barf()
 	table.insert(cols, colIdx + 1, { removedWin })
 
 	-- Make all windows in the affected columns have the same height
-	local screenFrame = getScreenFrame(screenId)
-	if not screenFrame then
-		return
-	end
+	local screenFrame = Screen(screenId):frame()
 	for i = colIdx, colIdx + 1 do
 		local col = cols[i]
 		if col then
@@ -2154,34 +2110,15 @@ function WM:init()
 
 	-- Watch for screen configuration changes (connect/disconnect)
 	WM._screenWatcher = hs.screen.watcher.new(function()
-		print("[screenWatcher] Screen configuration changed, retiling all screens...")
+		print("[screenWatcher] Screen configuration changed, reinitializing WM...")
 
-		-- Save current state
-		WM:saveState()
+		-- Save current state before reinitializing
+		saveState()
 
-		-- Initialize any new screens that don't have state yet
-		local screens = Screen.allScreens()
-		for _, screen in ipairs(screens) do
-			local screenId = screen:id()
-			if not state.screens[screenId] then
-				print("[screenWatcher] Initializing new screen:", screenId)
-				state.screens[screenId] = {}
-				state.activeSpaceForScreen[screenId] = 1
-				state.startXForScreenAndSpace[screenId] = {}
-				for i = 1, 9 do
-					state.startXForScreenAndSpace[screenId][i] = 0
-					state.screens[screenId][i] = { cols = {}, floating = {} }
-				end
-			end
-		end
+		-- Reinitialize to handle new screen configuration
+		WM:init()
 
-		-- Retile all screens to adjust to new configuration
-		retileAll()
-
-		-- Update menubar to reflect any changes
-		updateMenubar()
-
-		print("[screenWatcher] Screen configuration update complete")
+		print("[screenWatcher] Reinitialization complete")
 	end)
 	WM._screenWatcher:start()
 end
