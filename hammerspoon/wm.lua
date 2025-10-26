@@ -811,6 +811,7 @@ function WM:showSpaceChooser()
 	-- Refresh choices when showing
 	local choices = buildSpaceChoices()
 	WM._spaceChooser:choices(choices)
+	WM._spaceChooser:query("") -- Clear search text from previous invocation
 	WM._spaceChooser:show()
 end
 
