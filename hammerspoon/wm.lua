@@ -659,6 +659,47 @@ local function retileAll(opts)
 	end
 end
 
+local function updateMenubar()
+	if not WM._menubar then
+		return
+	end
+
+	-- Get all screens sorted by x position (left to right)
+	local screens = Screen.allScreens()
+	table.sort(screens, function(a, b)
+		return a:frame().x < b:frame().x
+	end)
+
+	-- Build title showing each screen's active space (e.g., "1|2")
+	local titleParts = {}
+	for _, screen in ipairs(screens) do
+		local screenId = screen:id()
+		local spaceId = state.activeSpaceForScreen[screenId] or 1
+		table.insert(titleParts, tostring(spaceId))
+	end
+	local title = table.concat(titleParts, "|")
+
+	-- Create menu for switching spaces on the current screen
+	local currentScreen = Mouse.getCurrentScreen()
+	local currentScreenId = currentScreen:id()
+	local currentSpaceId = state.activeSpaceForScreen[currentScreenId] or 1
+
+	local menu = {}
+	for i = 1, 4 do
+		local checked = (i == currentSpaceId)
+		table.insert(menu, {
+			title = "Space " .. i,
+			checked = checked,
+			fn = function()
+				WM:switchToSpace(i)
+			end,
+		})
+	end
+
+	WM._menubar:setTitle(title)
+	WM._menubar:setMenu(menu)
+end
+
 local function getWindowStackIndex(winId)
 	for i, v in ipairs(state.windowStack) do
 		if v == winId then
@@ -698,6 +739,7 @@ end
 
 local windowWatcherPaused = false
 WM._windowWatcher = hs.window.filter.new()
+WM._menubar = nil
 
 WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appName, event)
 	if windowWatcherPaused then
@@ -715,6 +757,9 @@ WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appNam
 		-- Only retile the affected screen's spaces
 		moveSpaceWindowsOffscreen(screenId, oldSpaceId)
 		retile(state, screenId, spaceId)
+
+		-- Update menubar to reflect space change
+		updateMenubar()
 	end
 	bringIntoView(win)
 end)
@@ -858,6 +903,9 @@ function WM:navigateStack(direction)
 		state.activeSpaceForScreen[screenId] = spaceId
 		moveSpaceWindowsOffscreen(screenId, currentSpaceId)
 		retile(state, screenId, spaceId, { duration = 0 })
+
+		-- Update menubar to reflect space change
+		updateMenubar()
 	end
 
 	windowWatcherPaused = true
@@ -1215,6 +1263,9 @@ function WM:switchToSpace(spaceId)
 	-- This prevents ghost windows from being raised later by focusWindow/app:activate
 	moveSpaceWindowsOffscreen(screenId, currentSpace) -- No flags = move ALL windows
 
+	-- Update menubar to reflect space change
+	updateMenubar()
+
 	local candidateWindowIds = flatten(state.screens[screenId][spaceId].cols)
 	local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
 	local nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
@@ -1465,6 +1516,9 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
 				-- Only retile the affected screen's spaces
 				moveSpaceWindowsOffscreen(screenId, currentSpaceId)
 				retile(state, screenId, spaceId)
+
+				-- Update menubar to reflect space change
+				updateMenubar()
 			end
 			local nextWindow = getWindow(nextWindowId)
 			focusWindow(nextWindow, function()
@@ -1700,6 +1754,10 @@ function WM:init()
 			end
 		end
 	end
+
+	-- Create menubar space indicator
+	WM._menubar = hs.menubar.new()
+	updateMenubar()
 
 	addToWindowStack(Window.focusedWindow())
 end
