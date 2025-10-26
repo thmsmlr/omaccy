@@ -171,6 +171,24 @@ local function getWindow(winId)
     return _windows[winId]
 end
 
+-- Removes invalid or closed windows from the window stack
+local function cleanWindowStack()
+    for i = #state.windowStack, 1, -1 do
+        local id = state.windowStack[i]
+        local win = _windows[id] or Window(id)
+        if not win or not win:isStandard() or not win:isVisible() then
+            table.remove(state.windowStack, i)
+        end
+    end
+    -- Clamp the active index to the valid range
+    if state.windowStackIndex > #state.windowStack then
+        state.windowStackIndex = #state.windowStack
+    end
+    if state.windowStackIndex < 1 then
+        state.windowStackIndex = 1
+    end
+end
+
 local function focusWindow(w, callback)
     local function waitForFocus(attempts)
         if attempts == 0 then return end
@@ -227,8 +245,9 @@ local function updateZOrder(cols, focusedWindowId)
     if not cols or #cols == 0 or not focusedWindowId then return end
 
     local totalWindowCount = #flatten(cols)
-    local _, _, focusedColIdx = locateWindow(focusedWindowId)
-    if not focusedColIdx then return end
+    local screenId, _, focusedColIdx = locateWindow(focusedWindowId)
+    if not focusedColIdx or not screenId then return end
+    local screenFrame = Screen(screenId):frame()
 
     -- Build desired front-to-back order
     local ordered = {}
@@ -248,8 +267,38 @@ local function updateZOrder(cols, focusedWindowId)
     while #ordered < totalWindowCount do
         local leftIdx  = focusedColIdx - offset
         local rightIdx = focusedColIdx + offset
-        if leftIdx >= 1 then appendColumn(leftIdx) end
-        if rightIdx <= #cols then appendColumn(rightIdx) end
+
+        -- For the immediate neighbours we may need to swap priority based on
+        -- whether either neighbour is clamped against the screen edge.
+        if offset == 1 then
+            local function isClamped(idx, side)
+                if idx < 1 or idx > #cols then return false end
+                local firstWinId = cols[idx][1]
+                if not firstWinId then return false end
+                local f = getWindow(firstWinId):frame()
+                if side == "left" then return f.x <= screenFrame.x + 1 end
+                if side == "right" then return (f.x + f.w) >= (screenFrame.x + screenFrame.w - 1) end
+                return false
+            end
+
+            local leftClamped  = isClamped(leftIdx, "left")
+            local rightClamped = isClamped(rightIdx, "right")
+
+            -- Default ordering is left then right. If the left column is clamped
+            -- we want the right column to appear in front, so we reverse the
+            -- order.  When the right column is clamped, the default ordering is
+            -- already correct, so no change is needed.
+            if leftClamped and not rightClamped then
+                if rightIdx <= #cols then appendColumn(rightIdx) end
+                if leftIdx >= 1 then appendColumn(leftIdx) end
+            else
+                if leftIdx >= 1 then appendColumn(leftIdx) end
+                if rightIdx <= #cols then appendColumn(rightIdx) end
+            end
+        else
+            if leftIdx >= 1 then appendColumn(leftIdx) end
+            if rightIdx <= #cols then appendColumn(rightIdx) end
+        end
         offset = offset + 1
     end
 
@@ -278,10 +327,6 @@ local function updateZOrder(cols, focusedWindowId)
         if pos > minFront then -- behind something it should front-run
             local w = getWindow(id)
             if w then
-                local title = w:title() or "<unknown>"
-
-                print(string.format("[updateZOrder] Raising window %s (id %s, pos %s) to front", title, tostring(id),
-                    tostring(pos)))
                 w:raise()
             end
             minFront = 0
@@ -291,13 +336,19 @@ local function updateZOrder(cols, focusedWindowId)
             end
         end
     end
-
-    -- Window(355518):raise()
-    -- Window(426929):raise()
 end
 
+local function framesDiffer(f1, f2, tolerance)
+    tolerance = tolerance or 1
+    return math.abs(f1.x - f2.x) > tolerance or
+           math.abs(f1.y - f2.y) > tolerance or
+           math.abs(f1.w - f2.w) > tolerance or
+           math.abs(f1.h - f2.h) > tolerance
+end
 
-local function retile(state, screenId, spaceId)
+local function retile(state, screenId, spaceId, opts)
+    opts = opts or {}
+
     local focusedWindowId = Window.focusedWindow():id()
     local cols = state.screens[screenId][spaceId].cols
     local screen = Screen(screenId)
@@ -306,10 +357,15 @@ local function retile(state, screenId, spaceId)
     local screenFrame = screen:frame()
     local y = screenFrame.y
     local h = screenFrame.h
-    local x = state.startXForScreenAndSpace[screenId][spaceId]
+    local x = screenFrame.x + state.startXForScreenAndSpace[screenId][spaceId]
 
     local targetColIdx = nil
 
+    -- Phase 1: Calculate all target frames and categorize windows
+    local visibleUpdates = {}
+    local offscreenUpdates = {}
+
+    local currentX = x
     for idx, col in ipairs(cols) do
         -- Find the maximum width in this column
         local maxColWidth = 0
@@ -330,49 +386,85 @@ local function retile(state, screenId, spaceId)
         local baseHeight = math.floor(availableHeight / n)
         local remainder = availableHeight - (baseHeight * n) -- Distribute remainder pixels
 
-        local colX = x
+        local colX = currentX
         local rowY = y
         for jdx, winId in ipairs(col) do
             local win = getWindow(winId)
             if win then
-                local frame = win:frame()
-                local minX = screenFrame.x
-                local maxX = screenFrame.x + screenFrame.w - maxColWidth
-                local clampedX = math.min(math.max(colX, minX), maxX)
-                frame.x = clampedX
-                frame.y = rowY
-                frame.w = maxColWidth
+                local currentFrame = win:frame()
+                local targetFrame = {
+                    x = math.min(math.max(colX, screenFrame.x - (maxColWidth / 2) + 1),
+                                screenFrame.x + screenFrame.w - (maxColWidth / 2) - 1),
+                    y = rowY,
+                    w = maxColWidth,
+                    h = baseHeight + ((jdx <= remainder) and 1 or 0)
+                }
 
-                -- Distribute remainder pixels to the first windows
-                local extra = (jdx <= remainder) and 1 or 0
-                local winHeight = baseHeight + extra
-                frame.h = winHeight
+                -- Determine if window will be visible on screen
+                -- Only consider "visible" if mostly on screen (not just edge-clipped)
+                local winLeft = targetFrame.x
+                local winRight = targetFrame.x + targetFrame.w
+                local screenLeft = screenFrame.x
+                local screenRight = screenFrame.x + screenFrame.w
 
-                win:setFrame(frame, 0)
-                rowY = rowY + winHeight + WM.tileGap
+                -- Calculate what percentage of the window is actually on screen
+                local visibleLeft = math.max(winLeft, screenLeft)
+                local visibleRight = math.min(winRight, screenRight)
+                local visibleWidth = math.max(0, visibleRight - visibleLeft)
+                local percentVisible = visibleWidth / targetFrame.w
+
+                -- Only consider "visible" if at least 75% is on screen
+                local isVisible = percentVisible > 0.75
+
+                local update = {
+                    winId = winId,
+                    win = win,
+                    currentFrame = currentFrame,
+                    targetFrame = targetFrame,
+                    isVisible = isVisible,
+                    colIdx = idx
+                }
+
+                if isVisible then
+                    table.insert(visibleUpdates, update)
+                else
+                    table.insert(offscreenUpdates, update)
+                end
+
+                rowY = rowY + targetFrame.h + WM.tileGap
                 if winId == focusedWindowId then
                     targetColIdx = idx
                 end
             end
         end
-        x = x + maxColWidth + WM.tileGap
+        currentX = currentX + maxColWidth + WM.tileGap
     end
 
-    if targetColIdx then
-        for _, winId in ipairs(cols[targetColIdx]) do
-            local win = getWindow(winId)
-            if win then
-                if winId == focusedWindowId then
-
+    -- Phase 2: Process visible windows first (user sees these immediately)
+    if not opts.onlyOffscreen then
+        for _, update in ipairs(visibleUpdates) do
+            if framesDiffer(update.currentFrame, update.targetFrame) then
+                if opts.duration then
+                    update.win:setFrame(update.targetFrame, opts.duration)
                 else
-                    win:raise()
+                    update.win:setFrame(update.targetFrame)
                 end
             end
         end
-        getWindow(focusedWindowId):raise()
     end
 
-    updateZOrder(cols, focusedWindowId)
+    -- Phase 3: Process offscreen windows (user doesn't see these)
+    if not opts.onlyVisible then
+        for _, update in ipairs(offscreenUpdates) do
+            if framesDiffer(update.currentFrame, update.targetFrame) then
+                if opts.duration then
+                    update.win:setFrame(update.targetFrame, opts.duration)
+                else
+                    update.win:setFrame(update.targetFrame)
+                end
+            end
+        end
+    end
 end
 
 local function bringIntoView(win)
@@ -392,14 +484,19 @@ local function bringIntoView(win)
     local currentLeft = win:frame().x
     local currentRight = win:frame().x + win:frame().w
 
+    local newStartX
     if currentLeft < 0 then
-        state.startXForScreenAndSpace[screenId][spaceId] = -preWidth
-        retile(state, screenId, spaceId)
+        newStartX = -preWidth
     elseif currentRight > screenFrame.w then
-        state.startXForScreenAndSpace[screenId][spaceId] = -preWidth + screenFrame.w - win:frame().w
-        retile(state, screenId, spaceId)
+        newStartX = -preWidth + screenFrame.w - win:frame().w
     else
-        state.startXForScreenAndSpace[screenId][spaceId] = -preWidth + currentLeft
+        newStartX = -preWidth + currentLeft
+    end
+
+    -- Only retile if startX actually changed
+    local oldStartX = state.startXForScreenAndSpace[screenId][spaceId]
+    state.startXForScreenAndSpace[screenId][spaceId] = newStartX
+    if math.abs(newStartX - oldStartX) > 1 then
         retile(state, screenId, spaceId)
     end
 end
@@ -444,43 +541,64 @@ local function getRightmostScreen()
 end
 
 -- Move all windows of the given space on the given screen to the rightmost edge of the rightmost screen
-local function moveSpaceWindowsOffscreen(screenId, spaceId)
+local function moveSpaceWindowsOffscreen(screenId, spaceId, opts)
+    opts = opts or {}
     if not state.screens[screenId] or not state.screens[screenId][spaceId] then return end
 
     local rightmostScreen = getRightmostScreen()
     local rightFrame = rightmostScreen:frame()
     local offscreenX = rightFrame.x + rightFrame.w - 1 -- leave 1px visible so macOS doesn't move it
+    local screenFrame = Screen(screenId):frame()
+    local screenLeft = screenFrame.x
+    local screenRight = screenFrame.x + screenFrame.w
+
+    local function processWindow(winId)
+        local win = getWindow(winId)
+        if win and win:isStandard() and win:isVisible() then
+            local f = win:frame()
+
+            -- Check if window is currently visible on screen
+            -- Only consider "visible" if at least 75% is on screen
+            local winLeft = f.x
+            local winRight = f.x + f.w
+            local visibleLeft = math.max(winLeft, screenLeft)
+            local visibleRight = math.min(winRight, screenRight)
+            local visibleWidth = math.max(0, visibleRight - visibleLeft)
+            local percentVisible = visibleWidth / f.w
+            local isCurrentlyVisible = percentVisible > 0.75
+
+            -- Skip based on priority mode
+            if opts.onlyVisible and not isCurrentlyVisible then return end
+            if opts.onlyOffscreen and isCurrentlyVisible then return end
+
+            -- Only move if not already offscreen
+            if math.abs(f.x - offscreenX) > 1 then
+                f.x = offscreenX
+                win:setFrame(f, 0)
+            end
+        end
+    end
 
     -- Move tiled windows
     for _, col in ipairs(state.screens[screenId][spaceId].cols) do
         for _, winId in ipairs(col) do
-            local win = getWindow(winId)
-            if win and win:isStandard() and win:isVisible() then
-                local f = win:frame()
-                f.x = offscreenX
-                win:setFrame(f, 0)
-            end
+            processWindow(winId)
         end
     end
 
     -- Move floating windows if any
     if state.screens[screenId][spaceId].floating then
         for _, winId in ipairs(state.screens[screenId][spaceId].floating) do
-            local win = getWindow(winId)
-            if win and win:isStandard() and win:isVisible() then
-                local f = win:frame()
-                f.x = offscreenX
-                win:setFrame(f, 0)
-            end
+            processWindow(winId)
         end
     end
 end
 
-local function retileAll()
+local function retileAll(opts)
     for screenId, spaces in pairs(state.screens) do
         for spaceId, _ in pairs(spaces) do
             if state.activeSpaceForScreen[screenId] == spaceId then
-                retile(state, screenId, spaceId)
+                retile(state, screenId, spaceId, opts)
             else
                 moveSpaceWindowsOffscreen(screenId, spaceId)
             end
@@ -533,8 +651,11 @@ WM._windowWatcher:subscribe(
         local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
         if not screenId or not spaceId or not colIdx or not rowIdx then return end
         if state.activeSpaceForScreen[screenId] ~= spaceId then
+            local oldSpaceId = state.activeSpaceForScreen[screenId]
             state.activeSpaceForScreen[screenId] = spaceId
-            retileAll()
+            -- Only retile the affected screen's spaces
+            moveSpaceWindowsOffscreen(screenId, oldSpaceId)
+            retile(state, screenId, spaceId)
         end
         bringIntoView(win)
     end
@@ -565,6 +686,7 @@ WM._windowWatcher:subscribe(
         table.insert(cols[colIdx], win:id())
 
         addToWindowStack(win)
+        cleanWindowStack()
         -- retile(state, screenId, spaceId)
         retileAll()
     end
@@ -591,19 +713,8 @@ WM._windowWatcher:subscribe(
             table.remove(state.screens[screenId][spaceId].cols, colIdx)
         end
 
-        -- Remove from windowStack
-        for i = #state.windowStack, 1, -1 do
-            if state.windowStack[i] == winId then
-                table.remove(state.windowStack, i)
-            end
-        end
-        -- Adjust windowStackIndex if needed
-        if state.windowStackIndex > #state.windowStack then
-            state.windowStackIndex = #state.windowStack
-        end
-        if state.windowStackIndex < 1 then
-            state.windowStackIndex = 1
-        end
+        -- Clean up the window stack to remove any now-invalid windows
+        cleanWindowStack()
 
         -- Remove from fullscreenOriginalWidth
         state.fullscreenOriginalWidth[winId] = nil
@@ -644,14 +755,15 @@ function WM:navigateStack(direction)
     local currentSpaceId = state.activeSpaceForScreen[screenId]
     if spaceId ~= currentSpaceId then
         state.activeSpaceForScreen[screenId] = spaceId
-        retileAll()
+        -- Only retile the affected screen's spaces
+        moveSpaceWindowsOffscreen(screenId, currentSpaceId)
+        retile(state, screenId, spaceId)
     end
 
     windowWatcherPaused = true
     focusWindow(win, function()
         bringIntoView(win)
         centerMouseInWindow(win)
-        addToWindowStack(win)
         hs.timer.doAfter(0.1, function()
             windowWatcherPaused = false
         end)
@@ -782,10 +894,7 @@ function WM:toggleFullscreen()
     end
 
     win:setFrame(frame, 0)
-
-    local screenId = win:screen():id()
-    local spaceId = state.activeSpaceForScreen[screenId]
-    retile(state, screenId, spaceId)
+    bringIntoView(win)
 end
 
 function WM:centerWindow()
@@ -827,7 +936,8 @@ function WM:resizeFocusedWindowHorizontally(delta)
         end
     end
 
-    retile(state, screenId, spaceId)
+    -- retile(state, screenId, spaceId)
+    bringIntoView(win)
 end
 
 function WM:resizeFocusedWindowVertically(delta)
@@ -899,7 +1009,7 @@ function WM:resizeFocusedWindowVertically(delta)
         local f = w:frame()
         f.y = y
         f.h = newHeights[i]
-        w:setFrame(f, 0)
+        w:setFrame(f)
         y = y + f.h + WM.tileGap
     end
 end
@@ -914,7 +1024,46 @@ function WM:switchToSpace(spaceId)
     if currentSpace == spaceId then return end
 
     state.activeSpaceForScreen[screenId] = spaceId
-    retileAll()
+
+    -- 4-phase optimized approach: show new content first, cleanup in background
+    -- Since setFrame() doesn't change z-order, we can show new windows behind,
+    -- raise them to top, then clean up old windows (user doesn't see this)
+
+    -- Phase 1: Show new visible windows (appear behind old windows initially)
+    retile(state, screenId, spaceId, { duration = 0, onlyVisible = true })
+
+    -- Phase 2: Raise new visible windows to top (now they cover old windows)
+    -- Use ONLY win:raise(), not app:activate(), to avoid raising ALL windows of that app
+    local screenFrame = Screen(screenId):frame()
+    local screenLeft = screenFrame.x
+    local screenRight = screenFrame.x + screenFrame.w
+
+    for _, col in ipairs(state.screens[screenId][spaceId].cols) do
+        for _, winId in ipairs(col) do
+            local win = getWindow(winId)
+            if win then
+                local f = win:frame()
+                -- Only raise if >75% visible
+                local winLeft = f.x
+                local winRight = f.x + f.w
+                local visibleLeft = math.max(winLeft, screenLeft)
+                local visibleRight = math.min(winRight, screenRight)
+                local visibleWidth = math.max(0, visibleRight - visibleLeft)
+                local percentVisible = visibleWidth / f.w
+
+                if percentVisible > 0.75 then
+                    win:raise()  -- Just raise, don't activate app (avoids raising ALL windows)
+                end
+            end
+        end
+    end
+
+    -- Phase 3: Clear old visible windows (user doesn't see this, already covered)
+    moveSpaceWindowsOffscreen(screenId, currentSpace, { onlyVisible = true })
+
+    -- Phase 4: Background cleanup - move ALL remaining old windows offscreen
+    -- This prevents ghost windows from being raised later by focusWindow/app:activate
+    moveSpaceWindowsOffscreen(screenId, currentSpace)  -- No flags = move ALL windows
 
     local candidateWindowIds = flatten(state.screens[screenId][spaceId].cols)
     local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
@@ -966,7 +1115,7 @@ function WM:slurp()
                 local f = w:frame()
                 f.y = y
                 f.h = winHeight
-                w:setFrame(f, 0)
+                w:setFrame(f)
                 y = y + winHeight + WM.tileGap
             end
         end
@@ -1005,7 +1154,7 @@ function WM:barf()
                         local f = w:frame()
                         f.y = y
                         f.h = winHeight
-                        w:setFrame(f, 0)
+                        w:setFrame(f)
                         y = y + winHeight + WM.tileGap
                     end
                 end
@@ -1129,7 +1278,9 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
             local currentSpaceId = state.activeSpaceForScreen[screenId]
             if spaceId ~= currentSpaceId then
                 state.activeSpaceForScreen[screenId] = spaceId
-                retileAll()
+                -- Only retile the affected screen's spaces
+                moveSpaceWindowsOffscreen(screenId, currentSpaceId)
+                retile(state, screenId, spaceId)
             end
             local nextWindow = getWindow(nextWindowId)
             focusWindow(nextWindow, function()
@@ -1268,7 +1419,8 @@ function WM:init()
                     if destSpaceId then
                         savedState.screens[targetScreenId][destSpaceId] = spaceData
                         if savedState.startXForScreenAndSpace[orphanId] and savedState.startXForScreenAndSpace[orphanId][spaceId] ~= nil then
-                            savedState.startXForScreenAndSpace[targetScreenId][destSpaceId] = savedState.startXForScreenAndSpace[orphanId][spaceId]
+                            savedState.startXForScreenAndSpace[targetScreenId][destSpaceId] = savedState
+                                .startXForScreenAndSpace[orphanId][spaceId]
                         end
                     end
                 end
@@ -1337,6 +1489,8 @@ function WM:init()
         state.screens[screenId][spaceId].cols[colIdx] = state.screens[screenId][spaceId].cols[colIdx] or {}
         table.insert(state.screens[screenId][spaceId].cols[colIdx], win:id())
     end
+
+    cleanWindowStack()
 
     for screenId, spaces in pairs(state.screens) do
         for spaceId, space in pairs(spaces) do
