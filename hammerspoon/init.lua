@@ -23,7 +23,11 @@ Movement shortcuts:
 
 ]]
 --
-local WM = require("wm")
+-- Enable IPC for external script access
+require("hs.ipc")
+
+-- Make WM global so external scripts can access it
+WM = require("wm")
 
 WM:init()
 

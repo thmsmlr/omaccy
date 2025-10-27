@@ -889,13 +889,54 @@ local function updateMenubar()
 	local currentSpaceId = state.activeSpaceForScreen[currentScreenId] or 1
 
 	local menu = {}
-	for i = 1, 4 do
-		local checked = (i == currentSpaceId)
+
+	-- Collect all spaces on the current screen that have windows
+	local spacesWithWindows = {}
+	if state.screens[currentScreenId] then
+		for spaceId, space in pairs(state.screens[currentScreenId]) do
+			-- Count windows in this space
+			local windowCount = 0
+			if space.cols then
+				for _, col in ipairs(space.cols) do
+					windowCount = windowCount + #col
+				end
+			end
+			if space.floating then
+				windowCount = windowCount + #space.floating
+			end
+
+			-- Only include spaces that have windows
+			if windowCount > 0 then
+				table.insert(spacesWithWindows, spaceId)
+			end
+		end
+	end
+
+	-- Sort spaces: numbers first, then strings alphabetically
+	table.sort(spacesWithWindows, function(a, b)
+		local aIsNum = type(a) == "number"
+		local bIsNum = type(b) == "number"
+		if aIsNum ~= bIsNum then
+			return aIsNum -- numbers before strings
+		end
+		return tostring(a) < tostring(b)
+	end)
+
+	-- Build menu items
+	for _, spaceId in ipairs(spacesWithWindows) do
+		local checked = (spaceId == currentSpaceId)
+		local title
+		if type(spaceId) == "string" then
+			title = spaceId -- Named space: show the name
+		else
+			title = "Space " .. spaceId -- Numbered space
+		end
+
 		table.insert(menu, {
-			title = "Space " .. i,
+			title = title,
 			checked = checked,
 			fn = function()
-				WM:switchToSpace(i)
+				WM:switchToSpace(spaceId)
 			end,
 		})
 	end

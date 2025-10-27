@@ -1,0 +1,509 @@
+#!/usr/bin/env -S uv run --script --quiet
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "click>=8.1.0",
+# ]
+# ///
+
+import click
+import subprocess
+import sys
+from pathlib import Path
+
+
+def run_command(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    """Run a shell command and return the result."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if check and result.returncode != 0:
+        click.echo(f"Error running command: {' '.join(cmd)}", err=True)
+        click.echo(result.stderr, err=True)
+        sys.exit(1)
+    return result
+
+
+def get_git_root() -> Path:
+    """Get the root directory of the current git repository."""
+    result = run_command(["git", "rev-parse", "--show-toplevel"])
+    return Path(result.stdout.strip())
+
+
+def get_project_name() -> str:
+    """Get the name of the current project (git repo directory name)."""
+    # Get the absolute git directory to handle worktrees correctly
+    result = run_command(["git", "rev-parse", "--absolute-git-dir"])
+    git_dir = Path(result.stdout.strip())
+    # The parent of .git is the main repository
+    return git_dir.parent.name
+
+
+def parse_worktree_list() -> list[dict]:
+    """Parse git worktree list --porcelain output into structured data."""
+    result = run_command(["git", "worktree", "list", "--porcelain"])
+
+    worktrees = []
+    current_worktree = {}
+
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            if current_worktree:
+                worktrees.append(current_worktree)
+                current_worktree = {}
+            continue
+
+        if line.startswith('worktree '):
+            current_worktree['path'] = line[9:]  # Remove 'worktree ' prefix
+        elif line.startswith('HEAD '):
+            current_worktree['head'] = line[5:]  # Remove 'HEAD ' prefix
+        elif line.startswith('branch '):
+            current_worktree['branch'] = line[7:]  # Remove 'branch ' prefix
+        elif line == 'bare':
+            current_worktree['bare'] = True
+        elif line == 'detached':
+            current_worktree['detached'] = True
+        elif line.startswith('locked'):
+            # Can be "locked" or "locked <reason>"
+            parts = line.split(' ', 1)
+            current_worktree['locked'] = True
+            if len(parts) > 1:
+                current_worktree['locked_reason'] = parts[1]
+        elif line.startswith('prunable'):
+            # Can be "prunable" or "prunable <reason>"
+            parts = line.split(' ', 1)
+            current_worktree['prunable'] = True
+            if len(parts) > 1:
+                current_worktree['prunable_reason'] = parts[1]
+
+    # Don't forget the last worktree
+    if current_worktree:
+        worktrees.append(current_worktree)
+
+    return worktrees
+
+
+def filter_project_worktrees(worktrees: list[dict], project_name: str) -> list[dict]:
+    """Filter worktrees to only include those belonging to the current project."""
+    # Get the absolute git directory to find the main repo
+    result = run_command(["git", "rev-parse", "--absolute-git-dir"])
+    git_dir = Path(result.stdout.strip())
+    main_repo_path = str(git_dir.parent)
+
+    project_prefix = str(Path.home() / "code" / "worktrees" / project_name)
+    filtered = []
+
+    for wt in worktrees:
+        path = wt['path']
+        # Include main repo and worktrees in the project directory
+        if path.startswith(project_prefix) or path == main_repo_path:
+            filtered.append(wt)
+
+    return filtered
+
+
+class AliasedGroup(click.Group):
+    """Click Group that supports command aliases."""
+
+    def get_command(self, ctx, cmd_name):
+        rv = click.Group.get_command(self, ctx, cmd_name)
+        if rv is not None:
+            return rv
+        # Check for aliases
+        for name, cmd in self.commands.items():
+            if hasattr(cmd, 'aliases') and cmd_name in cmd.aliases:
+                return cmd
+        return None
+
+    def format_commands(self, ctx, formatter):
+        """Extra format methods for multi methods that adds aliases."""
+        commands = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None:
+                continue
+            if cmd.hidden:
+                continue
+
+            # Add aliases to the help text
+            aliases = getattr(cmd, 'aliases', [])
+            if aliases:
+                subcommand = f"{subcommand} ({', '.join(aliases)})"
+
+            commands.append((subcommand, cmd.get_short_help_str(100)))
+
+        if commands:
+            with formatter.section("Commands"):
+                formatter.write_dl(commands)
+
+
+@click.group(cls=AliasedGroup)
+def main():
+    """Git worktree management tool."""
+    pass
+
+
+@main.command()
+@click.argument("branch")
+@click.option(
+    "--base",
+    "-b",
+    default=None,
+    help="Base branch to create the worktree from (default: current branch)",
+)
+def add(branch: str, base: str | None):
+    """
+    Create a git worktree for the current project.
+
+    Creates a worktree in ~/code/worktrees/<project>/<branch>
+    """
+    try:
+        # Ensure we're in a git repository
+        git_root = get_git_root()
+        project_name = get_project_name()
+
+        # Create worktree directory
+        worktrees_dir = Path.home() / "code" / "worktrees" / project_name
+        worktrees_dir.mkdir(parents=True, exist_ok=True)
+
+        worktree_path = worktrees_dir / branch
+
+        # Check if worktree already exists
+        if worktree_path.exists():
+            click.echo(f"Error: Worktree already exists at {worktree_path}", err=True)
+            sys.exit(1)
+
+        # Build git worktree command
+        cmd = ["git", "worktree", "add", str(worktree_path)]
+        if base:
+            cmd.extend(["-b", branch, base])
+        else:
+            cmd.extend(["-b", branch])
+
+        click.echo(f"Creating worktree: {worktree_path}")
+        run_command(cmd)
+
+        click.echo(f"✓ Worktree created at: {worktree_path}")
+        click.echo(f"\nTo navigate to the worktree:")
+        click.echo(f"  cd {worktree_path}")
+
+    except KeyboardInterrupt:
+        click.echo("\nAborted.", err=True)
+        sys.exit(1)
+
+
+@main.command(name='list')
+def list_worktrees():
+    """
+    List all worktrees for the current project.
+
+    Shows worktrees in ~/code/worktrees/<project>/ and the main repository.
+    """
+    try:
+        # Ensure we're in a git repository
+        git_root = get_git_root()
+        project_name = get_project_name()
+
+        # Get all worktrees
+        all_worktrees = parse_worktree_list()
+
+        # Filter to current project
+        project_worktrees = filter_project_worktrees(all_worktrees, project_name)
+
+        if not project_worktrees:
+            click.echo(f"No worktrees found for project: {project_name}")
+            return
+
+        # Display header
+        click.echo(f"\nWorktrees for project: {project_name}")
+        click.echo("=" * 80)
+
+        # Get current directory to mark active worktree
+        current_dir = str(Path.cwd().resolve())
+
+        for wt in project_worktrees:
+            path = wt['path']
+
+            # Determine if this is the active worktree
+            is_active = current_dir.startswith(path)
+            active_marker = "* " if is_active else "  "
+
+            # Get branch name or indicate detached/bare state
+            if wt.get('bare'):
+                branch_info = "(bare)"
+            elif wt.get('detached'):
+                branch_info = f"(detached HEAD {wt.get('head', '')[:8]})"
+            elif 'branch' in wt:
+                # Extract branch name from refs/heads/
+                branch = wt['branch']
+                if branch.startswith('refs/heads/'):
+                    branch = branch[11:]
+                branch_info = branch
+            else:
+                branch_info = "(unknown)"
+
+            # Build status indicators
+            status_parts = []
+            if wt.get('locked'):
+                reason = wt.get('locked_reason', 'locked')
+                status_parts.append(f"locked: {reason}")
+            if wt.get('prunable'):
+                reason = wt.get('prunable_reason', 'prunable')
+                status_parts.append(f"prunable: {reason}")
+
+            status_str = f" [{', '.join(status_parts)}]" if status_parts else ""
+
+            # Format output
+            click.echo(f"{active_marker}{branch_info:<30} {path}{status_str}")
+
+        click.echo()
+
+    except KeyboardInterrupt:
+        click.echo("\nAborted.", err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("branch")
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Force deletion even with uncommitted changes, and delete the branch",
+)
+@click.option(
+    "--delete-branch",
+    "-d",
+    is_flag=True,
+    help="Delete the associated git branch after removing the worktree",
+)
+def delete(branch: str, force: bool, delete_branch: bool):
+    """
+    Delete a git worktree for the given branch.
+
+    Removes the worktree from ~/code/worktrees/<project>/<branch>
+    and cleans up git references.
+    """
+    try:
+        # Ensure we're in a git repository
+        git_root = get_git_root()
+        project_name = get_project_name()
+
+        # Find the worktree path
+        worktree_path = Path.home() / "code" / "worktrees" / project_name / branch
+
+        # Check if worktree exists
+        if not worktree_path.exists():
+            click.echo(f"Error: Worktree not found at {worktree_path}", err=True)
+            sys.exit(1)
+
+        # Parse worktrees to verify it's a valid worktree
+        all_worktrees = parse_worktree_list()
+        worktree_info = None
+        for wt in all_worktrees:
+            if Path(wt['path']) == worktree_path:
+                worktree_info = wt
+                break
+
+        if not worktree_info:
+            click.echo(f"Error: {worktree_path} is not a valid git worktree", err=True)
+            sys.exit(1)
+
+        # Check if this is the current worktree
+        current_dir = str(Path.cwd().resolve())
+        if current_dir.startswith(str(worktree_path)):
+            click.echo(
+                f"Error: Cannot delete the current worktree. Please navigate to a different directory.",
+                err=True,
+            )
+            sys.exit(1)
+
+        # Check for uncommitted changes if not forcing
+        if not force:
+            # Check for uncommitted changes in the worktree
+            status_result = subprocess.run(
+                ["git", "-C", str(worktree_path), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+            )
+            if status_result.stdout.strip():
+                click.echo(
+                    f"Error: Worktree has uncommitted changes. Use --force to delete anyway.",
+                    err=True,
+                )
+                click.echo("\nUncommitted changes:", err=True)
+                click.echo(status_result.stdout, err=True)
+                sys.exit(1)
+
+        # Remove the worktree
+        click.echo(f"Removing worktree: {worktree_path}")
+        cmd = ["git", "worktree", "remove", str(worktree_path)]
+        if force:
+            cmd.append("--force")
+
+        result = run_command(cmd, check=False)
+        if result.returncode != 0:
+            click.echo(f"Error removing worktree: {result.stderr}", err=True)
+            sys.exit(1)
+
+        click.echo(f"✓ Worktree removed: {worktree_path}")
+
+        # Handle branch deletion
+        should_delete_branch = delete_branch or force
+        if should_delete_branch:
+            # Check if the branch exists
+            branch_check = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+                capture_output=True,
+                text=True,
+            )
+
+            if branch_check.returncode == 0:
+                # Confirm deletion if not forced
+                if not force and delete_branch:
+                    if click.confirm(f"Delete branch '{branch}'?"):
+                        branch_delete_cmd = ["git", "branch", "-D", branch]
+                        result = run_command(branch_delete_cmd, check=False)
+                        if result.returncode == 0:
+                            click.echo(f"✓ Branch deleted: {branch}")
+                        else:
+                            click.echo(
+                                f"Warning: Failed to delete branch: {result.stderr}",
+                                err=True,
+                            )
+                else:
+                    # Force deletion without confirmation
+                    branch_delete_cmd = ["git", "branch", "-D", branch]
+                    result = run_command(branch_delete_cmd, check=False)
+                    if result.returncode == 0:
+                        click.echo(f"✓ Branch deleted: {branch}")
+                    else:
+                        click.echo(
+                            f"Warning: Failed to delete branch: {result.stderr}",
+                            err=True,
+                        )
+
+    except KeyboardInterrupt:
+        click.echo("\nAborted.", err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("branch")
+@click.option(
+    "--base",
+    "-b",
+    default=None,
+    help="Base branch to create the worktree from (default: current branch)",
+)
+def workspace(branch: str, base: str | None):
+    """
+    Create a git worktree and set up a complete workspace environment.
+
+    Creates a worktree in ~/code/worktrees/<project>/<branch>, then:
+    - Creates a new named space in Hammerspoon (project/branch)
+    - Switches to that space
+    - Launches Ghostty terminal in the worktree directory
+    - Launches Google Chrome browser
+    """
+    try:
+        # Ensure we're in a git repository
+        git_root = get_git_root()
+        project_name = get_project_name()
+
+        # Create worktree directory
+        worktrees_dir = Path.home() / "code" / "worktrees" / project_name
+        worktrees_dir.mkdir(parents=True, exist_ok=True)
+
+        worktree_path = worktrees_dir / branch
+
+        # Check if worktree already exists
+        if worktree_path.exists():
+            click.echo(f"Worktree already exists at {worktree_path}")
+            click.echo("✓ Using existing worktree")
+        else:
+            # Build git worktree command
+            cmd = ["git", "worktree", "add", str(worktree_path)]
+            if base:
+                cmd.extend(["-b", branch, base])
+            else:
+                cmd.extend(["-b", branch])
+
+            click.echo(f"Creating worktree: {worktree_path}")
+            run_command(cmd)
+            click.echo(f"✓ Worktree created at: {worktree_path}")
+
+        # Set up Hammerspoon workspace
+        space_name = f"{project_name}/{branch}"
+        click.echo(f"\nSetting up workspace: {space_name}")
+
+        # Create the space
+        click.echo("Creating space...")
+        result = run_command(
+            ["hs", "-c", f'WM:createSpace("{space_name}")'],
+            check=False
+        )
+        if result.returncode != 0:
+            click.echo(f"Warning: Failed to create space: {result.stderr}", err=True)
+        else:
+            click.echo(f"✓ Space created: {space_name}")
+
+        # Switch to the space
+        click.echo("Switching to space...")
+        result = run_command(
+            ["hs", "-c", f'WM:switchToSpace("{space_name}")'],
+            check=False
+        )
+        if result.returncode != 0:
+            click.echo(f"Warning: Failed to switch to space: {result.stderr}", err=True)
+        else:
+            click.echo(f"✓ Switched to space: {space_name}")
+
+        # Launch Ghostty terminal in the worktree directory
+        click.echo("Launching Ghostty...")
+        ghostty_cmd = (
+            f'WM:launchOrFocusApp("Ghostty", '
+            f'"open -njga \\"/Applications/Ghostty.app\\" --args -d \\"{worktree_path}\\"", '
+            f'{{launchViaMenu=true, focusIfExists=false}})'
+        )
+        result = run_command(
+            ["hs", "-c", ghostty_cmd],
+            check=False
+        )
+        if result.returncode != 0:
+            click.echo(f"Warning: Failed to launch Ghostty: {result.stderr}", err=True)
+        else:
+            click.echo("✓ Ghostty launched")
+
+        # Launch Google Chrome
+        click.echo("Launching Google Chrome...")
+        chrome_cmd = (
+            f'WM:launchOrFocusApp("Google Chrome", '
+            f'"open -njga \\"/Applications/Google Chrome.app\\"", '
+            f'{{launchViaMenu=true, focusIfExists=false}})'
+        )
+        result = run_command(
+            ["hs", "-c", chrome_cmd],
+            check=False
+        )
+        if result.returncode != 0:
+            click.echo(f"Warning: Failed to launch Chrome: {result.stderr}", err=True)
+        else:
+            click.echo("✓ Google Chrome launched")
+
+        click.echo(f"\n✓ Workspace setup complete!")
+        click.echo(f"  Space: {space_name}")
+        click.echo(f"  Path: {worktree_path}")
+
+    except KeyboardInterrupt:
+        click.echo("\nAborted.", err=True)
+        sys.exit(1)
+
+
+# Set up command aliases
+list_worktrees.aliases = ['ls']
+delete.aliases = ['rm']
+workspace.aliases = ['ws']
+
+
+if __name__ == "__main__":
+    main()
+

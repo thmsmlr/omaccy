@@ -69,7 +69,36 @@ else
   echo "Chrome scripts source directory not found at $CHROME_SRC" >&2
 fi
 
+# Install bin scripts to user's local bin
+BIN_SRC="$SCRIPT_DIR/bin"
+BIN_DEST="$HOME/.local/bin"
+
+if [ -d "$BIN_SRC" ]; then
+  # Ensure ~/.local/bin exists
+  mkdir -p "$BIN_DEST"
+
+  echo "Linking bin scripts to $BIN_DEST"
+  for SCRIPT in "$BIN_SRC"/*; do
+    if [ -f "$SCRIPT" ]; then
+      SCRIPT_NAME=$(basename "$SCRIPT")
+      DEST="$BIN_DEST/$SCRIPT_NAME"
+
+      if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then
+        BACKUP="$DEST.backup.$(date +%s)"
+        echo "Existing script $DEST detected. Backing up to $BACKUP"
+        mv "$DEST" "$BACKUP"
+      fi
+
+      ln -sfn "$SCRIPT" "$DEST"
+      echo "  • Linked $SCRIPT_NAME"
+    fi
+  done
+else
+  echo "No bin directory found at $BIN_SRC (optional)"
+fi
+
 echo "\n✅ Installation complete."
 echo " • Open Hammerspoon and press ⌘+R to reload the configuration."
-echo " • Open Google Chrome, navigate to chrome://extensions, enable Developer mode, click 'Load unpacked', and select $CHROME_DEST to load the omaccy extension.\n" 
+echo " • Open Google Chrome, navigate to chrome://extensions, enable Developer mode, click 'Load unpacked', and select $CHROME_DEST to load the omaccy extension."
+echo " • Ensure ~/.local/bin is in your PATH to use the installed bin scripts.\n" 
 
