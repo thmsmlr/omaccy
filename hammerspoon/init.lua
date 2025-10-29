@@ -33,7 +33,7 @@ WM:init()
 
 hs.window.animationDuration = 0.05
 
-local SCROLL_IGNORE_APPS = { "Cursor", "iTerm2", "Ghostty" }
+local SCROLL_IGNORE_APPS = { "Cursor", "iTerm2", "Ghostty", "Code" }
 local scrollDown = function()
 	WM:scroll("down", { ignoreApps = SCROLL_IGNORE_APPS })
 end
@@ -180,7 +180,7 @@ end
 applicationHotkey("t", "Ghostty", "open -njga '/Applications/Ghostty.app'", { launchViaMenu = true })
 applicationHotkey("b", "Google Chrome", "/Users/thomas/.local/bin/chrome", { launchViaMenu = true })
 applicationHotkey("e", "Cursor", "open -njga '/Applications/Cursor.app'", { launchViaMenu = true })
-applicationHotkey("s", "Spotify", "open -a '/Applications/Spotify.app'", { singleton = true })
+applicationHotkey("s", "Slack", "open -a '/Applications/Slack.app'", { singleton = true })
 applicationHotkey("n", "Notes", "open -a '/System/Applications/Notes.app'", { singleton = true })
 applicationHotkey("x", "X", 'open -na "/Users/thomas/Applications/Chrome Apps.localized/X.app"', { singleton = true })
 applicationHotkey(

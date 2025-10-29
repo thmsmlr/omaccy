@@ -1,0 +1,1 @@
+- hs -c 'return hs.console.getConsole()' is the command to fetch Hammerspoon console logs that you can use to check your work, or any errors the human reports
