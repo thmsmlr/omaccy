@@ -39,6 +39,7 @@ local state = {
 	windowStackIndex = 1,
 	startXForScreenAndSpace = {},
 	fullscreenOriginalWidth = {},
+	urgentWindows = {}, -- { [windowId] = true }
 }
 
 -- Command palette state (not persisted)
@@ -620,6 +621,34 @@ local function bringIntoView(win)
 	end
 end
 
+------------------------------------------
+-- Urgency helpers
+------------------------------------------
+
+-- Get all urgent windows in a specific space
+local function getUrgentWindowsInSpace(screenId, spaceId)
+	local urgentWindows = {}
+	if not state.screens[screenId] or not state.screens[screenId][spaceId] then
+		return urgentWindows
+	end
+
+	local space = state.screens[screenId][spaceId]
+	for _, col in ipairs(space.cols or {}) do
+		for _, winId in ipairs(col) do
+			if state.urgentWindows[winId] then
+				table.insert(urgentWindows, winId)
+			end
+		end
+	end
+
+	return urgentWindows
+end
+
+-- Check if a space has any urgent windows
+local function isSpaceUrgent(screenId, spaceId)
+	return #getUrgentWindowsInSpace(screenId, spaceId) > 0
+end
+
 -- Returns the index in `xs` of the value from `xs` that appears earliest in `ys`, or nil if none found.
 -- That is, among all values in `xs` that are present in `ys`, returns the index in `xs` whose value appears at the lowest index in `ys`.
 local function earliestIndexInList(xs, ys)
@@ -833,6 +862,7 @@ local function buildSpaceList(query, actionType)
 				local subText
 				local isCurrent = (spaceId == activeSpaceId)
 				local hasMultipleScreens = #screens > 1
+				local isUrgent = isSpaceUrgent(screenId, spaceId)
 
 				if type(spaceId) == "string" then
 					text = spaceId -- Named space: show the name
@@ -858,12 +888,18 @@ local function buildSpaceList(query, actionType)
 					subText = table.concat(parts, " · ")
 				end
 
+				-- Prefix with urgency indicator
+				if isUrgent then
+					text = "● " .. text
+				end
+
 				table.insert(choices, {
 					text = text,
 					subText = subText,
 					screenId = screenId,
 					spaceId = spaceId,
 					isCurrent = isCurrent,
+					isUrgent = isUrgent,
 					actionType = actionType,
 				})
 
@@ -975,7 +1011,7 @@ local function buildSpaceList(query, actionType)
 		end
 	end
 
-	-- Sort: by fuzzy match score (highest first), then current space, then by screen/spaceId
+	-- Sort: by fuzzy match score (highest first), then urgency, then current space, then by screen/spaceId
 	table.sort(choices, function(a, b)
 		-- Compare scores (higher score = better match, should come first)
 		local aScore = a.score or 0
@@ -985,7 +1021,12 @@ local function buildSpaceList(query, actionType)
 			return aScore > bScore -- higher score first
 		end
 
-		-- If scores are equal, current space comes first
+		-- If scores are equal, urgent spaces come first
+		if a.isUrgent ~= b.isUrgent then
+			return a.isUrgent
+		end
+
+		-- Then current space comes first
 		if a.isCurrent ~= b.isCurrent then
 			return a.isCurrent
 		end
@@ -1226,7 +1267,16 @@ WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appNam
 	end
 	print("[windowFocused]", win:title(), win:id(), windowWatcherPaused)
 	addToWindowStack(win)
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
+
+	-- Clear urgency for focused window
+	local winId = win:id()
+	if state.urgentWindows[winId] then
+		state.urgentWindows[winId] = nil
+		print("[urgency] Cleared urgency for window " .. winId)
+		updateMenubar()
+	end
+
+	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
 	if not screenId or not spaceId or not colIdx or not rowIdx then
 		return
 	end
@@ -1784,14 +1834,34 @@ function WM:switchToSpace(spaceId)
 	-- Update menubar to reflect space change
 	updateMenubar()
 
+	-- Check if there are urgent windows in this space
+	local urgentWindowIds = getUrgentWindowsInSpace(screenId, spaceId)
 	local candidateWindowIds = flatten(state.screens[screenId][spaceId].cols)
-	local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
-	local nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
+	local nextWindowId
+
+	if #urgentWindowIds > 0 then
+		-- Focus the first urgent window (by earliest in window stack)
+		local urgentWindowIdx = earliestIndexInList(urgentWindowIds, state.windowStack)
+		nextWindowId = urgentWindowIds[urgentWindowIdx] or urgentWindowIds[1]
+	else
+		-- No urgent windows, use normal logic (earliest from window stack)
+		local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
+		nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
+	end
+
 	if nextWindowId then
 		local nextWindow = getWindow(nextWindowId)
+		-- Bring window into view BEFORE focusing, so macOS can actually focus it
+		bringIntoView(nextWindow)
+
+		-- Clear urgency for the window we're about to focus
+		if state.urgentWindows[nextWindowId] then
+			state.urgentWindows[nextWindowId] = nil
+			WM.log.df("[urgency] Cleared urgency for window %d", nextWindowId)
+		end
+
 		focusWindow(nextWindow, function()
 			addToWindowStack(nextWindow)
-			bringIntoView(nextWindow)
 			centerMouseInWindow(nextWindow)
 			hs.timer.doAfter(0.1, function()
 				windowWatcherPaused = false
@@ -2029,6 +2099,55 @@ function WM:renameSpace(screenId, oldSpaceId, newSpaceId)
 	self:saveState()
 
 	print("[renameSpace]", "Successfully renamed space to:", newSpaceId)
+end
+
+------------------------------------------
+-- Urgency methods
+------------------------------------------
+
+function WM:setWindowUrgent(winId, urgent)
+	if urgent then
+		state.urgentWindows[winId] = true
+		print("[urgency] Window " .. winId .. " marked urgent")
+	else
+		state.urgentWindows[winId] = nil
+		print("[urgency] Window " .. winId .. " urgency cleared")
+	end
+	updateMenubar()
+end
+
+function WM:clearWindowUrgent(winId)
+	self:setWindowUrgent(winId, false)
+end
+
+function WM:setCurrentWindowUrgent()
+	local win = Window.focusedWindow()
+	if win then
+		self:setWindowUrgent(win:id(), true)
+	end
+end
+
+function WM:setUrgentByApp(appName)
+	local app = Application.get(appName)
+	if not app then
+		print("[urgency] Application not found: " .. appName)
+		return
+	end
+
+	local count = 0
+	for _, win in ipairs(app:allWindows()) do
+		if win:isStandard() and win:isVisible() then
+			self:setWindowUrgent(win:id(), true)
+			count = count + 1
+		end
+	end
+	print("[urgency] Marked " .. count .. " windows urgent for app: " .. appName)
+end
+
+function WM:clearAllUrgent()
+	state.urgentWindows = {}
+	print("[urgency] Cleared all urgent windows")
+	updateMenubar()
 end
 
 function WM:scroll(direction, opts)
@@ -2536,6 +2655,7 @@ function WM:init()
 	state.windowStack = savedState.windowStack or state.windowStack
 	state.windowStackIndex = savedState.windowStackIndex or state.windowStackIndex
 	state.fullscreenOriginalWidth = savedState.fullscreenOriginalWidth or state.fullscreenOriginalWidth
+	state.urgentWindows = savedState.urgentWindows or state.urgentWindows
 	state.activeSpaceForScreen = savedState.activeSpaceForScreen or state.activeSpaceForScreen
 	state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or state.startXForScreenAndSpace
 
