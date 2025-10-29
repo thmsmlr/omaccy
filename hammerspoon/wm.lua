@@ -519,14 +519,24 @@ local function bringIntoView(win)
 		return
 	end
 	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	local screenFrame = Screen(screenId):frame()
+	if not screenId or not spaceId or not colIdx then
+		return
+	end
+
+	local screen = Screen(screenId)
+	if not screen then
+		return
+	end
+	local screenFrame = screen:frame()
 
 	-- Total width (plus gaps) before the target window in the stack
 	local preWidth = 0
 	for i = 1, colIdx - 1 do
 		local winId = state.screens[screenId][spaceId].cols[i][1]
-		local win = getWindow(winId)
-		preWidth = preWidth + win:frame().w + WM.tileGap
+		local w = getWindow(winId)
+		if w then
+			preWidth = preWidth + w:frame().w + WM.tileGap
+		end
 	end
 
 	-- Current on-screen position of the target window
@@ -675,12 +685,14 @@ local function buildSpaceList(query, actionType)
 	end)
 
 	-- Check if query matches an existing space (that has windows)
+	-- This determines whether to show the "Create space" option
 	local queryMatchesExisting = false
 	if query ~= "" then
-		-- Check if query is a numbered space
+		local lowerQuery = string.lower(query)
+
+		-- Check if query is a numbered space (exact match for numbers)
 		local queryNum = tonumber(query)
 		if queryNum then
-			-- Check if this numbered space exists on any screen and has windows
 			for _, screen in ipairs(screens) do
 				local screenId = screen:id()
 				if state.screens[screenId] and state.screens[screenId][queryNum] then
@@ -692,13 +704,29 @@ local function buildSpaceList(query, actionType)
 					end
 				end
 			end
-		else
-			-- Check if query matches any named space
+		end
+
+		-- Check if query matches any named space (prefix/substring match)
+		if not queryMatchesExisting then
 			for _, screen in ipairs(screens) do
 				local screenId = screen:id()
-				if state.screens[screenId] and state.screens[screenId][query] then
-					queryMatchesExisting = true
-					break
+				if state.screens[screenId] then
+					for spaceId, space in pairs(state.screens[screenId]) do
+						if type(spaceId) == "string" then
+							local hasWindows = (space.cols and #space.cols > 0) or (space.floating and #space.floating > 0)
+							if hasWindows then
+								local lowerSpaceName = string.lower(spaceId)
+								-- Check if query is a prefix or substring
+								if lowerSpaceName:find(lowerQuery, 1, true) then
+									queryMatchesExisting = true
+									break
+								end
+							end
+						end
+					end
+					if queryMatchesExisting then
+						break
+					end
 				end
 			end
 		end
@@ -784,47 +812,140 @@ local function buildSpaceList(query, actionType)
 		end
 	end
 
-	-- Filter choices based on query (simple fuzzy matching)
+	-- Fuzzy matching function: checks if all characters in query appear in order in text
+	-- Returns score (higher is better) or nil if no match
+	local function fuzzyMatch(query, text)
+		if query == "" then
+			return 0
+		end
+
+		local lowerQuery = string.lower(query)
+		local lowerText = string.lower(text)
+		local queryLen = #lowerQuery
+		local textLen = #lowerText
+		local score = 0
+		local queryIdx = 1
+		local lastMatchIdx = 0
+		local consecutiveMatches = 0
+
+		-- Check if all query characters appear in order
+		for textIdx = 1, textLen do
+			if queryIdx > queryLen then
+				break
+			end
+
+			local queryChar = lowerQuery:sub(queryIdx, queryIdx)
+			local textChar = lowerText:sub(textIdx, textIdx)
+
+			if queryChar == textChar then
+				-- Character match found
+				local isPrefix = (queryIdx == 1 and textIdx == 1)
+				local isConsecutive = (textIdx == lastMatchIdx + 1)
+				local isCaseMatch = (query:sub(queryIdx, queryIdx) == text:sub(textIdx, textIdx))
+
+				-- Calculate score
+				score = score + 100 -- base score for match
+
+				if isPrefix then
+					score = score + 200 -- big bonus for prefix match
+				end
+
+				if isConsecutive then
+					consecutiveMatches = consecutiveMatches + 1
+					score = score + (50 * consecutiveMatches) -- bonus for consecutive matches
+				else
+					consecutiveMatches = 0
+				end
+
+				if isCaseMatch then
+					score = score + 10 -- small bonus for case match
+				end
+
+				-- Bonus for matches earlier in the string
+				score = score + (100 - textIdx)
+
+				lastMatchIdx = textIdx
+				queryIdx = queryIdx + 1
+			end
+		end
+
+		-- Return score if all query characters were matched
+		if queryIdx > queryLen then
+			return score
+		else
+			return nil
+		end
+	end
+
+	-- Filter and score choices based on fuzzy matching
 	if query ~= "" then
 		local filtered = {}
-		local lowerQuery = string.lower(query)
 
 		for _, choice in ipairs(choices) do
 			-- Always include the create action
 			if choice.actionType == "createAndSwitchSpace" then
+				choice.score = math.huge -- Always at top
 				table.insert(filtered, choice)
 			else
-				-- Simple fuzzy match: check if query matches text or subtext
-				local text = string.lower(choice.text)
-				local subText = choice.subText and string.lower(choice.subText) or ""
+				-- Try fuzzy matching against text and subtext
+				local textScore = fuzzyMatch(query, choice.text)
+				local subTextScore = choice.subText and fuzzyMatch(query, choice.subText) or nil
 
-				if text:find(lowerQuery, 1, true) or subText:find(lowerQuery, 1, true) then
+				-- Use the better score
+				local bestScore = nil
+				if textScore and subTextScore then
+					bestScore = math.max(textScore, subTextScore)
+				elseif textScore then
+					bestScore = textScore
+				elseif subTextScore then
+					bestScore = subTextScore
+				end
+
+				if bestScore then
+					choice.score = bestScore
 					table.insert(filtered, choice)
 				end
 			end
 		end
 		choices = filtered
+	else
+		-- No query: assign scores for default sorting
+		for _, choice in ipairs(choices) do
+			choice.score = 0
+		end
 	end
 
-	-- Sort: current space first, then by screen, then by spaceId
+	-- Sort: by fuzzy match score (highest first), then current space, then by screen/spaceId
 	table.sort(choices, function(a, b)
-		-- Create action always comes first
-		if (a.actionType == "createAndSwitchSpace") ~= (b.actionType == "createAndSwitchSpace") then
-			return a.actionType == "createAndSwitchSpace"
+		-- Compare scores (higher score = better match, should come first)
+		local aScore = a.score or 0
+		local bScore = b.score or 0
+
+		if aScore ~= bScore then
+			return aScore > bScore -- higher score first
 		end
+
+		-- If scores are equal, current space comes first
 		if a.isCurrent ~= b.isCurrent then
-			return a.isCurrent -- current space first
+			return a.isCurrent
 		end
-		if a.screenId ~= b.screenId then
+
+		-- Then by screen
+		if a.screenId and b.screenId and a.screenId ~= b.screenId then
 			return a.screenId < b.screenId
 		end
-		-- Sort spaceIds: numbers before strings, then alphabetically
-		local aIsNum = type(a.spaceId) == "number"
-		local bIsNum = type(b.spaceId) == "number"
-		if aIsNum ~= bIsNum then
-			return aIsNum -- numbers before strings
+
+		-- Finally by spaceId: numbers before strings, then alphabetically
+		if a.spaceId and b.spaceId then
+			local aIsNum = type(a.spaceId) == "number"
+			local bIsNum = type(b.spaceId) == "number"
+			if aIsNum ~= bIsNum then
+				return aIsNum -- numbers before strings
+			end
+			return tostring(a.spaceId) < tostring(b.spaceId)
 		end
-		return tostring(a.spaceId) < tostring(b.spaceId)
+
+		return false
 	end)
 
 	return choices
@@ -834,10 +955,18 @@ local function buildCommandPaletteChoices(query)
 	query = query or ""
 
 	if commandPaletteMode == "root" then
-		-- Root menu: show spaces directly for switching, plus "Move window to space" command
+		-- Root menu: show spaces directly for switching, plus additional commands
 		local choices = buildSpaceList(query, "switchSpace")
 
-		-- Add "Move window to space" command at the bottom (less common action)
+		-- Add "Rename space" command
+		table.insert(choices, {
+			text = "Rename space",
+			subText = "Rename the current space",
+			actionType = "navigateToRenameSpace",
+			valid = false, -- Don't close chooser when selected
+		})
+
+		-- Add "Move window to space" command
 		table.insert(choices, {
 			text = "Move window to space",
 			subText = "Move focused window to another space",
@@ -849,6 +978,36 @@ local function buildCommandPaletteChoices(query)
 	elseif commandPaletteMode == "moveWindowToSpace" then
 		-- Show space list with "move window to space" action
 		local choices = buildSpaceList(query, "moveWindowToSpace")
+
+		return choices
+	elseif commandPaletteMode == "renameSpace" then
+		-- Show option to rename current space to the query
+		local choices = {}
+
+		-- Get current space info
+		local currentScreen = Mouse.getCurrentScreen()
+		local currentScreenId = currentScreen:id()
+		local currentSpaceId = state.activeSpaceForScreen[currentScreenId]
+
+		if query ~= "" then
+			-- Show "Rename to: {query}" option
+			table.insert(choices, {
+				text = "Rename to: " .. query,
+				subText = "Rename current space '" .. tostring(currentSpaceId) .. "' to '" .. query .. "'",
+				actionType = "renameSpace",
+				newSpaceId = query,
+				oldSpaceId = currentSpaceId,
+				screenId = currentScreenId,
+			})
+		else
+			-- Show instruction when no query
+			table.insert(choices, {
+				text = "Type new name for space '" .. tostring(currentSpaceId) .. "'",
+				subText = "Current space will be renamed",
+				actionType = "instruction",
+				valid = false,
+			})
+		end
 
 		return choices
 	end
@@ -1374,11 +1533,22 @@ function WM:centerWindow()
 		return
 	end
 	local screenId, spaceId, colIdx, _ = locateWindow(win:id())
-	local screenFrame = Screen(screenId):frame()
+	if not screenId or not spaceId or not colIdx then
+		return
+	end
+
+	local screen = Screen(screenId)
+	if not screen then
+		return
+	end
+	local screenFrame = screen:frame()
 
 	local preWidth = 0
 	for i = 1, colIdx - 1 do
-		preWidth = preWidth + getWindow(state.screens[screenId][spaceId].cols[i][1]):frame().w + WM.tileGap
+		local w = getWindow(state.screens[screenId][spaceId].cols[i][1])
+		if w then
+			preWidth = preWidth + w:frame().w + WM.tileGap
+		end
 	end
 
 	local targetX = (screenFrame.w - win:frame().w) / 2
@@ -1750,6 +1920,57 @@ function WM:createSpace(spaceId, screenId)
 	return spaceId
 end
 
+function WM:renameSpace(screenId, oldSpaceId, newSpaceId)
+	-- Validate inputs
+	if not screenId or not oldSpaceId or not newSpaceId then
+		print("[renameSpace] Error: missing required parameters")
+		return
+	end
+
+	-- Check if old space exists
+	if not state.screens[screenId] or not state.screens[screenId][oldSpaceId] then
+		print("[renameSpace] Error: space", oldSpaceId, "does not exist on screen", screenId)
+		return
+	end
+
+	-- Check if new space name already exists
+	if state.screens[screenId][newSpaceId] then
+		print("[renameSpace] Error: space", newSpaceId, "already exists on screen", screenId)
+		return
+	end
+
+	-- Don't allow renaming numbered spaces (1-4)
+	if type(oldSpaceId) == "number" and oldSpaceId >= 1 and oldSpaceId <= 9 then
+		print("[renameSpace] Error: cannot rename numbered space", oldSpaceId)
+		return
+	end
+
+	print("[renameSpace]", "Renaming space:", oldSpaceId, "->", newSpaceId, "on screen:", screenId)
+
+	-- Move space data to new key
+	state.screens[screenId][newSpaceId] = state.screens[screenId][oldSpaceId]
+	state.screens[screenId][oldSpaceId] = nil
+
+	-- Move startX data
+	if state.startXForScreenAndSpace[screenId] then
+		state.startXForScreenAndSpace[screenId][newSpaceId] = state.startXForScreenAndSpace[screenId][oldSpaceId] or 0
+		state.startXForScreenAndSpace[screenId][oldSpaceId] = nil
+	end
+
+	-- Update activeSpaceForScreen if this was the active space
+	if state.activeSpaceForScreen[screenId] == oldSpaceId then
+		state.activeSpaceForScreen[screenId] = newSpaceId
+	end
+
+	-- Update menubar to reflect the rename
+	updateMenubar()
+
+	-- Save state
+	self:saveState()
+
+	print("[renameSpace]", "Successfully renamed space to:", newSpaceId)
+end
+
 function WM:scroll(direction, opts)
 	local ignoreApps = opts.ignoreApps or {}
 	local win = Window.focusedWindow()
@@ -1925,148 +2146,356 @@ function WM:saveState()
 	Settings.set("wm_two_state", serpent.dump(state))
 end
 
-function WM:init()
+------------------------------------------
+-- State initialization helpers
+------------------------------------------
+
+-- Load saved state from settings
+local function loadSavedState()
 	local ok, savedState = serpent.load(Settings.get("wm_two_state") or "{ screens = {} }")
+	if not ok then
+		print("[init] Failed to load saved state, starting fresh")
+		return { screens = {} }
+	end
+	return savedState
+end
+
+-- Get all currently open standard windows
+local function getCurrentWindows()
+	local windows = {}
+	for _, app in ipairs(Application.runningApplications()) do
+		for _, win in ipairs(app:allWindows()) do
+			if win:isStandard() and win:isVisible() and not win:isFullScreen() then
+				table.insert(windows, win)
+			end
+		end
+	end
+	return windows
+end
+
+-- Validate that a window ID still exists and is usable
+local function isValidWindow(winId)
+	local win = Window(winId)
+	return win and win:isStandard() and win:isVisible()
+end
+
+-- Clean invalid window IDs from saved state structure
+local function cleanSavedStateWindows(savedState)
+	local deadWindows = {}
+	for screenId, spaces in pairs(savedState.screens or {}) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				-- Clean each column, removing invalid window IDs
+				for colIdx = #space.cols, 1, -1 do
+					local col = space.cols[colIdx]
+					for rowIdx = #col, 1, -1 do
+						if not isValidWindow(col[rowIdx]) then
+							table.insert(deadWindows, {
+								winId = col[rowIdx],
+								spaceId = spaceId,
+								screenId = screenId
+							})
+							table.remove(col, rowIdx)
+						end
+					end
+					-- Remove empty columns
+					if #col == 0 then
+						table.remove(space.cols, colIdx)
+					end
+				end
+			end
+		end
+	end
+
+	if #deadWindows > 0 then
+		print("[init] Found " .. #deadWindows .. " dead windows in saved state, will clean them up:")
+		for _, info in ipairs(deadWindows) do
+			print("  - Window ID " .. info.winId .. " in space '" .. tostring(info.spaceId) .. "' on screen " .. info.screenId)
+		end
+	end
+end
+
+-- Handle screens that have been disconnected - migrate their spaces to first available screen
+local function migrateDisconnectedScreens(savedState)
+	local connectedScreens = {}
+	local availableScreens = Screen.allScreens()
+
+	for _, scr in ipairs(availableScreens) do
+		connectedScreens[scr:id()] = true
+	end
+
+	local firstScreen = availableScreens[1]
+	if not firstScreen then
+		return
+	end
+
+	local targetScreenId = firstScreen:id()
+	savedState.screens[targetScreenId] = savedState.screens[targetScreenId] or {}
+	savedState.startXForScreenAndSpace = savedState.startXForScreenAndSpace or {}
+	savedState.startXForScreenAndSpace[targetScreenId] = savedState.startXForScreenAndSpace[targetScreenId] or {}
+
+	-- Find orphaned screens
+	local orphanedScreenIds = {}
+	for savedScreenId, _ in pairs(savedState.screens or {}) do
+		if not connectedScreens[savedScreenId] then
+			table.insert(orphanedScreenIds, savedScreenId)
+		end
+	end
+
+	-- Migrate each orphaned screen's spaces
+	for _, orphanId in ipairs(orphanedScreenIds) do
+		local orphanSpaces = savedState.screens[orphanId]
+		for spaceId, spaceData in pairs(orphanSpaces) do
+			local destSpaceId = nil
+
+			if type(spaceId) == "string" then
+				-- Named space: preserve name or add suffix if collision
+				if not savedState.screens[targetScreenId][spaceId] then
+					destSpaceId = spaceId
+				else
+					local suffix = 2
+					while savedState.screens[targetScreenId][spaceId .. "_" .. suffix] do
+						suffix = suffix + 1
+					end
+					destSpaceId = spaceId .. "_" .. suffix
+					print("[init] Named space collision: '" .. spaceId .. "' -> '" .. destSpaceId .. "'")
+				end
+			else
+				-- Numbered space: find open slot
+				for i = 1, 9 do
+					local existing = savedState.screens[targetScreenId][i]
+					if not existing or (#(existing.cols or {}) == 0) then
+						destSpaceId = i
+						break
+					end
+				end
+
+				if not destSpaceId then
+					destSpaceId = "space_" .. spaceId .. "_migrated"
+					print("[init] No numbered slots, converting to named: " .. destSpaceId)
+				end
+			end
+
+			if destSpaceId then
+				savedState.screens[targetScreenId][destSpaceId] = spaceData
+				if savedState.startXForScreenAndSpace[orphanId] and savedState.startXForScreenAndSpace[orphanId][spaceId] then
+					savedState.startXForScreenAndSpace[targetScreenId][destSpaceId] = savedState.startXForScreenAndSpace[orphanId][spaceId]
+				end
+			end
+		end
+
+		savedState.screens[orphanId] = nil
+		savedState.startXForScreenAndSpace[orphanId] = nil
+	end
+end
+
+-- Initialize screen structures with empty spaces
+local function initializeScreenStructures(savedState)
+	for _, screen in ipairs(Screen.allScreens()) do
+		local screenId = screen:id()
+
+		state.screens[screenId] = {}
+		state.activeSpaceForScreen[screenId] = state.activeSpaceForScreen[screenId] or 1
+		state.startXForScreenAndSpace[screenId] = state.startXForScreenAndSpace[screenId] or {}
+
+		-- Initialize numbered spaces 1-9
+		for i = 1, 9 do
+			state.screens[screenId][i] = { cols = {}, floating = {} }
+			state.startXForScreenAndSpace[screenId][i] = state.startXForScreenAndSpace[screenId][i] or 0
+		end
+
+		-- Restore any named spaces from saved state
+		if savedState.screens[screenId] then
+			for spaceId, spaceData in pairs(savedState.screens[screenId]) do
+				if type(spaceId) == "string" then
+					state.screens[screenId][spaceId] = { cols = {}, floating = {} }
+					state.startXForScreenAndSpace[screenId][spaceId] = savedState.startXForScreenAndSpace[screenId] and savedState.startXForScreenAndSpace[screenId][spaceId] or 0
+				end
+			end
+		end
+	end
+end
+
+-- Reconcile current windows with saved placements
+local function reconcileWindows(savedState)
+	-- Build placement map from saved state
+	local savedPlacements = {}
+	for screenId, spaces in pairs(savedState.screens or {}) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				for colIdx, col in ipairs(space.cols) do
+					for rowIdx, winId in ipairs(col) do
+						savedPlacements[winId] = {
+							screenId = screenId,
+							spaceId = spaceId,
+							colIdx = colIdx,
+							rowIdx = rowIdx,
+						}
+					end
+				end
+			end
+		end
+	end
+
+	-- Process all current windows
+	local currentWindows = getCurrentWindows()
+	local placedWindows = {}
+
+	-- First pass: place windows that have valid saved positions
+	for _, win in ipairs(currentWindows) do
+		local winId = win:id()
+		local placement = savedPlacements[winId]
+
+		if placement then
+			local screenId = placement.screenId
+			local spaceId = placement.spaceId
+
+			-- Check if the screen and space still exist
+			if state.screens[screenId] and state.screens[screenId][spaceId] then
+				-- Place in saved position
+				local cols = state.screens[screenId][spaceId].cols
+				cols[placement.colIdx] = cols[placement.colIdx] or {}
+				table.insert(cols[placement.colIdx], winId)
+				placedWindows[winId] = true
+
+				print("[init] Restored window " .. winId .. " to space " .. tostring(spaceId))
+			end
+		end
+	end
+
+	-- Second pass: place windows without saved positions in space 1 of their current screen
+	for _, win in ipairs(currentWindows) do
+		local winId = win:id()
+		if not placedWindows[winId] then
+			local screen = win:screen()
+			local screenId = screen and screen:id() or Screen.mainScreen():id()
+			local spaceId = 1 -- Always place new windows in space 1
+
+			local cols = state.screens[screenId][spaceId].cols
+			table.insert(cols, { winId })
+
+			print("[init] Placed new window " .. winId .. " in space 1")
+		end
+	end
+
+	-- Clean up: remove empty columns and compact
+	for screenId, spaces in pairs(state.screens) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				-- Remove empty columns
+				for colIdx = #space.cols, 1, -1 do
+					if #space.cols[colIdx] == 0 then
+						table.remove(space.cols, colIdx)
+					end
+				end
+			end
+		end
+	end
+end
+
+-- Setup UI components (menubar and command palette)
+local function setupUI()
+	-- Create menubar space indicator
+	WM._menubar = hs.menubar.new()
+	updateMenubar()
+
+	-- Create command palette (fuzzy finder for commands and spaces)
+	WM._commandPalette = hs.chooser.new(function(choice)
+		if not choice then
+			commandPaletteMode = "root"
+			WM._commandPalette:hide()
+			return
+		end
+
+		local actionType = choice.actionType
+		local targetScreenId = choice.screenId
+		local targetSpaceId = choice.spaceId
+
+		if actionType == "createAndSwitchSpace" then
+			WM:createSpace(targetSpaceId, targetScreenId)
+			local currentScreen = Mouse.getCurrentScreen()
+			if currentScreen:id() ~= targetScreenId then
+				local targetScreen = Screen(targetScreenId)
+				local frame = targetScreen:frame()
+				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
+			end
+			WM:switchToSpace(targetSpaceId)
+		elseif actionType == "switchSpace" then
+			local currentScreen = Mouse.getCurrentScreen()
+			if currentScreen:id() ~= targetScreenId then
+				local targetScreen = Screen(targetScreenId)
+				local frame = targetScreen:frame()
+				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
+			end
+			WM:switchToSpace(targetSpaceId)
+		elseif actionType == "moveWindowToSpace" then
+			WM:moveFocusedWindowToSpace(targetSpaceId)
+		elseif actionType == "renameSpace" then
+			WM:renameSpace(choice.screenId, choice.oldSpaceId, choice.newSpaceId)
+		end
+
+		commandPaletteMode = "root"
+	end)
+
+	WM._commandPalette:invalidCallback(function(choice)
+		if not choice then
+			return
+		end
+
+		local actionType = choice.actionType
+		if actionType == "navigateToMoveWindow" then
+			print("[commandPalette] Navigating to moveWindowToSpace mode")
+			commandPaletteMode = "moveWindowToSpace"
+			WM._commandPalette:query("")
+			local choices = buildCommandPaletteChoices()
+			WM._commandPalette:choices(choices)
+		elseif actionType == "navigateToRenameSpace" then
+			print("[commandPalette] Navigating to renameSpace mode")
+			commandPaletteMode = "renameSpace"
+			WM._commandPalette:query("")
+			local choices = buildCommandPaletteChoices()
+			WM._commandPalette:choices(choices)
+		end
+	end)
+
+	WM._commandPalette:queryChangedCallback(function(query)
+		local choices = buildCommandPaletteChoices(query)
+		WM._commandPalette:choices(choices)
+	end)
+
+	WM._commandPalette:bgDark(true)
+end
+
+function WM:init()
+	print("[init] Starting window manager initialization")
+
+	-- 1. Load saved state
+	local savedState = loadSavedState()
+
+	-- 2. Restore non-window state
 	state.windowStack = savedState.windowStack or state.windowStack
 	state.windowStackIndex = savedState.windowStackIndex or state.windowStackIndex
 	state.fullscreenOriginalWidth = savedState.fullscreenOriginalWidth or state.fullscreenOriginalWidth
 	state.activeSpaceForScreen = savedState.activeSpaceForScreen or state.activeSpaceForScreen
 	state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or state.startXForScreenAndSpace
 
-	-- Move spaces that belonged to monitors which are no longer connected onto the
-	-- first currently-connected screen. This preserves the layout of those
-	-- spaces between reloads instead of discarding them.
-	do
-		-- Build a set of screen ids that are actually present right now
-		local connectedScreens = {}
-		local availableScreens = Screen.allScreens()
-		for _, scr in ipairs(availableScreens) do
-			connectedScreens[scr:id()] = true
-		end
+	-- 3. Clean invalid window IDs from saved state
+	cleanSavedStateWindows(savedState)
 
-		-- If there is at least one screen connected, use the first one as the
-		-- destination for any orphaned spaces.
-		local firstScreen = availableScreens[1]
-		if firstScreen then
-			local targetScreenId = firstScreen:id()
+	-- 4. Handle disconnected monitors
+	migrateDisconnectedScreens(savedState)
 
-			-- Ensure the target screen has tables ready to receive moved data
-			savedState.screens[targetScreenId] = savedState.screens[targetScreenId] or {}
-			savedState.startXForScreenAndSpace = savedState.startXForScreenAndSpace or {}
-			savedState.startXForScreenAndSpace[targetScreenId] = savedState.startXForScreenAndSpace[targetScreenId]
-				or {}
+	-- 5. Initialize screen structures
+	initializeScreenStructures(savedState)
 
-			-- Identify screens present in the saved state that are no longer connected
-			local orphanedScreenIds = {}
-			for savedScreenId, _ in pairs(savedState.screens) do
-				if not connectedScreens[savedScreenId] then
-					table.insert(orphanedScreenIds, savedScreenId)
-				end
-			end
+	-- 6. Reconcile current windows with saved state
+	reconcileWindows(savedState)
 
-			-- Re-home each orphaned screen's spaces onto the target screen
-			for _, orphanId in ipairs(orphanedScreenIds) do
-				local orphanSpaces = savedState.screens[orphanId]
-				for spaceId, spaceData in pairs(orphanSpaces) do
-					-- Find the first unused space slot (1-9) on the target screen
-					local destSpaceId = nil
-					for i = 1, 9 do
-						local existing = savedState.screens[targetScreenId][i]
-						if not existing or (#(existing.cols or {}) == 0 and #(existing.floating or {}) == 0) then
-							destSpaceId = i
-							break
-						end
-					end
-					-- If we found an open slot, move the space data and its stored X offset
-					if destSpaceId then
-						savedState.screens[targetScreenId][destSpaceId] = spaceData
-						if
-							savedState.startXForScreenAndSpace[orphanId]
-							and savedState.startXForScreenAndSpace[orphanId][spaceId] ~= nil
-						then
-							savedState.startXForScreenAndSpace[targetScreenId][destSpaceId] =
-								savedState.startXForScreenAndSpace[orphanId][spaceId]
-						end
-					end
-				end
-				-- Remove the orphaned screen so we do not reference it later
-				savedState.screens[orphanId] = nil
-				savedState.startXForScreenAndSpace[orphanId] = nil
-			end
-		end
-	end
-
-	local placements = {} -- window:id() -> { screenId, spaceId, colIdx, rowIdx, isFloating }
-	for _, screen in ipairs(Screen.allScreens()) do
-		local screenId = screen:id()
-		local spaces = savedState.screens[screenId] or {}
-		for spaceId, space in pairs(spaces) do
-			for colIdx, col in ipairs(space.cols) do
-				for rowIdx, winId in ipairs(col) do
-					placements[winId] = { screenId = screenId, spaceId = spaceId, colIdx = colIdx, rowIdx = rowIdx }
-				end
-			end
-		end
-	end
-
-	-- Re-build default structures for all screens/spaces
-	for _, screen in ipairs(Screen.allScreens()) do
-		local screenId = screen:id()
-		state.activeSpaceForScreen[screenId] = state.activeSpaceForScreen[screenId] or 1
-		state.startXForScreenAndSpace[screenId] = state.startXForScreenAndSpace[screenId] or {}
-		state.screens[screenId] = state.screens[screenId] or {}
-		for i = 1, 9 do
-			if state.startXForScreenAndSpace[screenId][i] == nil then
-				state.startXForScreenAndSpace[screenId][i] = 0
-			end
-			state.screens[screenId][i] = state.screens[screenId][i] or { cols = {}, floating = {} }
-		end
-	end
-
-	local unplacedWindows = {}
-	for _, app in ipairs(Application.runningApplications()) do
-		for _, win in ipairs(app:allWindows()) do
-			if win:isStandard() and win:isVisible() and not win:isFullScreen() then
-				local id = win:id()
-				local placed = placements[id]
-				local screenId, spaceId, colIdx, rowIdx
-
-				if placed then
-					screenId = placed.screenId
-					spaceId = placed.spaceId
-					colIdx = placed.colIdx
-					rowIdx = placed.rowIdx
-
-					-- Ensure the space exists (might be a named space not initialized in the loop above)
-					if not state.screens[screenId] then
-						state.screens[screenId] = {}
-					end
-					if not state.screens[screenId][spaceId] then
-						state.screens[screenId][spaceId] = { cols = {}, floating = {} }
-						state.startXForScreenAndSpace[screenId] = state.startXForScreenAndSpace[screenId] or {}
-						state.startXForScreenAndSpace[screenId][spaceId] = 0
-					end
-
-					state.screens[screenId][spaceId].cols[colIdx] = state.screens[screenId][spaceId].cols[colIdx] or {}
-					state.screens[screenId][spaceId].cols[colIdx][rowIdx] = win:id()
-				else
-					table.insert(unplacedWindows, win)
-				end
-			end
-		end
-	end
-
-	for _, win in ipairs(unplacedWindows) do
-		local screen = win:screen()
-		local screenId = screen and screen:id() or Screen.mainScreen():id()
-		local spaceId = state.activeSpaceForScreen[screenId] or 1
-		local colIdx = #state.screens[screenId][spaceId].cols + 1
-		state.screens[screenId][spaceId].cols[colIdx] = state.screens[screenId][spaceId].cols[colIdx] or {}
-		table.insert(state.screens[screenId][spaceId].cols[colIdx], win:id())
-	end
-
+	-- 7. Clean window stack
 	cleanWindowStack()
 
+	-- 8. Retile all spaces
+	print("[init] Retiling all spaces")
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
 			if state.activeSpaceForScreen[screenId] == spaceId then
@@ -2077,101 +2506,13 @@ function WM:init()
 		end
 	end
 
-	-- Create menubar space indicator
-	WM._menubar = hs.menubar.new()
-	updateMenubar()
+	-- 9. Setup UI
+	setupUI()
 
-	-- Create command palette (fuzzy finder for commands and spaces)
-	WM._commandPalette = hs.chooser.new(function(choice)
-		if not choice then
-			-- Reset to root mode when dismissed
-			commandPaletteMode = "root"
-			-- Explicitly hide the chooser
-			WM._commandPalette:hide()
-			return
-		end
-
-		-- Handle space actions (final actions that close the palette)
-		local actionType = choice.actionType
-		local targetScreenId = choice.screenId
-		local targetSpaceId = choice.spaceId
-
-		if actionType == "createAndSwitchSpace" then
-			-- Create the new space
-			WM:createSpace(targetSpaceId, targetScreenId)
-
-			-- If different screen, move mouse there first
-			local currentScreen = Mouse.getCurrentScreen()
-			if currentScreen:id() ~= targetScreenId then
-				local targetScreen = Screen(targetScreenId)
-				local frame = targetScreen:frame()
-				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
-			end
-
-			-- Switch to the space
-			WM:switchToSpace(targetSpaceId)
-		elseif actionType == "switchSpace" then
-			-- If different screen, move mouse there first
-			local currentScreen = Mouse.getCurrentScreen()
-			if currentScreen:id() ~= targetScreenId then
-				local targetScreen = Screen(targetScreenId)
-				local frame = targetScreen:frame()
-				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
-			end
-
-			-- Switch to the space
-			WM:switchToSpace(targetSpaceId)
-		elseif actionType == "moveWindowToSpace" then
-			-- Move focused window to the selected space
-			WM:moveFocusedWindowToSpace(targetSpaceId)
-		end
-
-		-- Reset to root mode after completing an action
-		commandPaletteMode = "root"
-	end)
-
-	-- Handle invalid choices (valid=false) - keeps chooser open for navigation
-	WM._commandPalette:invalidCallback(function(choice)
-		if not choice then
-			return
-		end
-
-		local actionType = choice.actionType
-
-		-- Handle navigation actions (switch modes without closing)
-		if actionType == "navigateToMoveWindow" then
-			print("[commandPalette] Navigating to moveWindowToSpace mode")
-			commandPaletteMode = "moveWindowToSpace"
-			WM._commandPalette:query("")
-			local choices = buildCommandPaletteChoices()
-			WM._commandPalette:choices(choices)
-		end
-	end)
-
-	-- Disable built-in filtering since we handle it in queryChangedCallback
-	WM._commandPalette:queryChangedCallback(function(query)
-		local choices = buildCommandPaletteChoices(query)
-		WM._commandPalette:choices(choices)
-	end)
-
-	-- Set background color to make the chooser more visible
-	WM._commandPalette:bgDark(true)
-
+	-- 10. Add focused window to stack
 	addToWindowStack(Window.focusedWindow())
 
-	-- Watch for screen configuration changes (connect/disconnect)
-	WM._screenWatcher = hs.screen.watcher.new(function()
-		print("[screenWatcher] Screen configuration changed, reinitializing WM...")
-
-		-- Save current state before reinitializing
-		WM:saveState()
-
-		-- Reinitialize to handle new screen configuration
-		WM:init()
-
-		print("[screenWatcher] Reinitialization complete")
-	end)
-	WM._screenWatcher:start()
+	print("[init] Initialization complete")
 end
 
 hs.hotkey.bind({ "cmd", "ctrl" }, "t", function()
