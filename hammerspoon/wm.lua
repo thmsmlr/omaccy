@@ -388,6 +388,53 @@ local function framesDiffer(f1, f2, tolerance)
 		or math.abs(f1.h - f2.h) > tolerance
 end
 
+-- Check if a screen has any neighboring screens nearby
+-- Returns true if there are screens within proximity threshold
+local function screenHasNeighbors(screenId)
+	local screen = Screen(screenId)
+	if not screen then
+		return false
+	end
+
+	local frame = screen:frame()
+	local allScreens = Screen.allScreens()
+
+	-- If only one screen exists, no neighbors possible
+	if #allScreens <= 1 then
+		return false
+	end
+
+	-- Check if any other screen is close enough to be considered a neighbor
+	-- We consider screens neighbors if their edges are within 50 pixels of each other
+	local proximityThreshold = 50
+
+	for _, otherScreen in ipairs(allScreens) do
+		if otherScreen:id() ~= screenId then
+			local otherFrame = otherScreen:frame()
+
+			-- Check horizontal proximity (screens side by side)
+			-- Right edge of current screen near left edge of other screen
+			local rightToLeft = math.abs((frame.x + frame.w) - otherFrame.x)
+			-- Left edge of current screen near right edge of other screen
+			local leftToRight = math.abs(frame.x - (otherFrame.x + otherFrame.w))
+
+			-- Check vertical proximity (screens stacked)
+			-- Bottom edge of current screen near top edge of other screen
+			local bottomToTop = math.abs((frame.y + frame.h) - otherFrame.y)
+			-- Top edge of current screen near bottom edge of other screen
+			local topToBottom = math.abs(frame.y - (otherFrame.y + otherFrame.h))
+
+			-- If any edge is within threshold, they're neighbors
+			if rightToLeft < proximityThreshold or leftToRight < proximityThreshold or
+			   bottomToTop < proximityThreshold or topToBottom < proximityThreshold then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
 local function retile(state, screenId, spaceId, opts)
 	opts = opts or {}
 
@@ -403,6 +450,18 @@ local function retile(state, screenId, spaceId, opts)
 	local y = screenFrame.y
 	local h = screenFrame.h
 	local x = screenFrame.x + state.startXForScreenAndSpace[screenId][spaceId]
+
+	-- Determine clipping margin based on screen neighbors
+	-- If screen has neighbors, clip at 50% to prevent macOS from moving windows to adjacent screens
+	-- If no neighbors, clip more aggressively (almost fully offscreen) for cleaner appearance
+	local hasNeighbors = screenHasNeighbors(screenId)
+	local function getClipMargin(windowWidth)
+		if hasNeighbors then
+			return windowWidth / 2  -- Clip at 50% (current behavior)
+		else
+			return windowWidth - 1  -- Clip almost fully (only 1px visible)
+		end
+	end
 
 	local targetColIdx = nil
 
@@ -437,10 +496,11 @@ local function retile(state, screenId, spaceId, opts)
 			local win = getWindow(winId)
 			if win then
 				local currentFrame = win:frame()
+				local clipMargin = getClipMargin(maxColWidth)
 				local targetFrame = {
 					x = math.min(
-						math.max(colX, screenFrame.x - (maxColWidth / 2) + 1),
-						screenFrame.x + screenFrame.w - (maxColWidth / 2) - 1
+						math.max(colX, screenFrame.x - clipMargin + 1),
+						screenFrame.x + screenFrame.w - clipMargin - 1
 					),
 					y = rowY,
 					w = maxColWidth,
