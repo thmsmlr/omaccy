@@ -821,16 +821,26 @@ local function buildSpaceList(query, actionType)
 		end
 	end
 
-	-- Add "Create space" option if query doesn't match and isn't empty (only for switchSpace action)
-	if actionType == "switchSpace" and query ~= "" and not queryMatchesExisting then
+	-- Add "Create space" option if query doesn't match and isn't empty
+	if query ~= "" and not queryMatchesExisting then
 		local currentScreen = Mouse.getCurrentScreen()
-		table.insert(choices, {
-			text = "+ Create space: " .. query,
-			subText = "Create new named space and switch to it",
-			screenId = currentScreen:id(),
-			spaceId = query,
-			actionType = "createAndSwitchSpace",
-		})
+		if actionType == "switchSpace" then
+			table.insert(choices, {
+				text = "+ Create space: " .. query,
+				subText = "Create new named space and switch to it",
+				screenId = currentScreen:id(),
+				spaceId = query,
+				actionType = "createAndSwitchSpace",
+			})
+		elseif actionType == "moveWindowToSpace" then
+			table.insert(choices, {
+				text = "+ Create space: " .. query,
+				subText = "Create new named space and move focused window to it",
+				screenId = currentScreen:id(),
+				spaceId = query,
+				actionType = "createAndMoveWindowToSpace",
+			})
+		end
 	end
 
 	-- Build choices for each screen's spaces
@@ -2599,6 +2609,9 @@ local function setupUI()
 				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
 			end
 			WM:switchToSpace(targetSpaceId)
+		elseif actionType == "createAndMoveWindowToSpace" then
+			WM:createSpace(targetSpaceId, targetScreenId)
+			WM:moveFocusedWindowToSpace(targetSpaceId)
 		elseif actionType == "switchSpace" then
 			local currentScreen = Mouse.getCurrentScreen()
 			if currentScreen:id() ~= targetScreenId then
