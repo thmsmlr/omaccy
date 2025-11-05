@@ -634,11 +634,19 @@ local function getUrgentWindowsInSpace(screenId, spaceId)
 	end
 
 	local space = state.screens[screenId][spaceId]
+	-- Check tiled windows
 	for _, col in ipairs(space.cols or {}) do
 		for _, winId in ipairs(col) do
 			if state.urgentWindows[winId] then
 				table.insert(urgentWindows, winId)
 			end
+		end
+	end
+
+	-- Check floating windows
+	for _, winId in ipairs(space.floating or {}) do
+		if state.urgentWindows[winId] then
+			table.insert(urgentWindows, winId)
 		end
 	end
 
@@ -1332,6 +1340,13 @@ WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appNam
 		state.urgentWindows[winId] = nil
 		print("[urgency] Cleared urgency for window " .. winId)
 		updateMenubar()
+
+		-- Refresh command palette if it's visible
+		if WM._commandPalette and WM._commandPalette:isVisible() then
+			local currentQuery = WM._commandPalette:query()
+			local choices = buildCommandPaletteChoices(currentQuery)
+			WM._commandPalette:choices(choices)
+		end
 	end
 
 	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
@@ -2172,6 +2187,13 @@ function WM:setWindowUrgent(winId, urgent)
 		print("[urgency] Window " .. winId .. " urgency cleared")
 	end
 	updateMenubar()
+
+	-- Refresh command palette if it's visible
+	if WM._commandPalette and WM._commandPalette:isVisible() then
+		local currentQuery = WM._commandPalette:query()
+		local choices = buildCommandPaletteChoices(currentQuery)
+		WM._commandPalette:choices(choices)
+	end
 end
 
 function WM:clearWindowUrgent(winId)
