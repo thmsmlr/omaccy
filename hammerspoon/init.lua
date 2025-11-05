@@ -154,6 +154,32 @@ hs.hotkey.bind({ "cmd", "ctrl" }, "`", function()
 	end
 end)
 
+hs.hotkey.bind({ "cmd", "ctrl", "shift" }, "`", function()
+	if WM._commandPalette and WM._commandPalette:isVisible() and WM._commandPalette.selectedRow then
+		-- Cycle to previous item
+		local current = WM._commandPalette:selectedRow() or 1
+		local total = WM._commandPalette:rows()
+
+		if total > 0 then
+			local prev = ((current - 2 + total) % total) + 1
+			WM._commandPalette:selectedRow(prev)
+
+			-- If selection didn't change (hit invalid row), find last valid row
+			if WM._commandPalette:selectedRow() == current then
+				for i = total, 1, -1 do
+					WM._commandPalette:selectedRow(i)
+					if WM._commandPalette:selectedRow() == i then
+						break
+					end
+				end
+			end
+		end
+	else
+		-- Show palette normally
+		WM:showCommandPalette()
+	end
+end)
+
 -- App Launcher Shortcuts --
 
 local function applicationHotkey(key, appName, command, opts)
