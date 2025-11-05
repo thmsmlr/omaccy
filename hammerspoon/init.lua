@@ -134,7 +134,24 @@ end)
 
 -- Command Palette (fuzzy finder for commands and spaces) --
 hs.hotkey.bind({ "cmd", "ctrl" }, "`", function()
-	WM:showCommandPalette()
+	if WM._commandPalette and WM._commandPalette:isVisible() and WM._commandPalette.selectedRow then
+		-- Cycle to next item
+		local current = WM._commandPalette:selectedRow() or 1
+		local total = WM._commandPalette:rows()
+
+		if total > 0 then
+			local next = (current % total) + 1
+			WM._commandPalette:selectedRow(next)
+
+			-- If selection didn't change (hit invalid row), wrap to 1
+			if WM._commandPalette:selectedRow() == current then
+				WM._commandPalette:selectedRow(1)
+			end
+		end
+	else
+		-- Show palette normally
+		WM:showCommandPalette()
+	end
 end)
 
 -- App Launcher Shortcuts --

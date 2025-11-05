@@ -44,6 +44,7 @@ local state = {
 
 -- Command palette state (not persisted)
 local commandPaletteMode = "root" -- "root" or "moveWindowToSpace"
+local previousChoicesCount = 0
 
 --[[
 
@@ -668,6 +669,51 @@ local function earliestIndexInList(xs, ys)
 	return minXIdx
 end
 
+-- Returns the (screenId, spaceId) for a given window ID, or nil if not found
+local function getSpaceForWindow(winId)
+	for screenId, spaces in pairs(state.screens) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				for _, col in ipairs(space.cols) do
+					for _, id in ipairs(col) do
+						if id == winId then
+							return screenId, spaceId
+						end
+					end
+				end
+			end
+			if space.floating then
+				for _, id in ipairs(space.floating) do
+					if id == winId then
+						return screenId, spaceId
+					end
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
+-- Derives space MRU order from the window stack
+-- Returns an array of {screenId, spaceId} pairs, ordered by most recently used
+local function getSpaceMRUOrder()
+	local seen = {}
+	local order = {}
+
+	for _, winId in ipairs(state.windowStack) do
+		local screenId, spaceId = getSpaceForWindow(winId)
+		if spaceId then
+			local key = screenId .. ":" .. spaceId
+			if not seen[key] then
+				seen[key] = true
+				table.insert(order, {screenId = screenId, spaceId = spaceId})
+			end
+		end
+	end
+
+	return order
+end
+
 local function centerMouseInWindow(win)
 	if not win then
 		return
@@ -1021,7 +1067,21 @@ local function buildSpaceList(query, actionType)
 		end
 	end
 
-	-- Sort: by fuzzy match score (highest first), then urgency, then current space, then by screen/spaceId
+	-- Compute MRU order from window stack and assign mruIndex to each choice
+	local spaceMRU = getSpaceMRUOrder()
+	for _, choice in ipairs(choices) do
+		-- Find this space in the MRU order
+		local mruIndex = nil
+		for i, space in ipairs(spaceMRU) do
+			if space.screenId == choice.screenId and space.spaceId == choice.spaceId then
+				mruIndex = i
+				break
+			end
+		end
+		choice.mruIndex = mruIndex or math.huge -- Spaces not in MRU go to the end
+	end
+
+	-- Sort: by fuzzy match score (highest first), then urgency, then MRU order
 	table.sort(choices, function(a, b)
 		-- Compare scores (higher score = better match, should come first)
 		local aScore = a.score or 0
@@ -1036,27 +1096,11 @@ local function buildSpaceList(query, actionType)
 			return a.isUrgent
 		end
 
-		-- Then current space comes first
-		if a.isCurrent ~= b.isCurrent then
-			return a.isCurrent
-		end
+		-- Then by MRU order (lower index = more recent = comes first)
+		local aMRU = a.mruIndex or math.huge
+		local bMRU = b.mruIndex or math.huge
 
-		-- Then by screen
-		if a.screenId and b.screenId and a.screenId ~= b.screenId then
-			return a.screenId < b.screenId
-		end
-
-		-- Finally by spaceId: numbers before strings, then alphabetically
-		if a.spaceId and b.spaceId then
-			local aIsNum = type(a.spaceId) == "number"
-			local bIsNum = type(b.spaceId) == "number"
-			if aIsNum ~= bIsNum then
-				return aIsNum -- numbers before strings
-			end
-			return tostring(a.spaceId) < tostring(b.spaceId)
-		end
-
-		return false
+		return aMRU < bMRU
 	end)
 
 	return choices
@@ -1223,9 +1267,13 @@ function WM:showCommandPalette()
 	-- Reset to root mode
 	commandPaletteMode = "root"
 
+	-- Clean window stack before building choices to ensure fresh MRU data
+	cleanWindowStack()
+
 	-- Refresh choices when showing
 	local choices = buildCommandPaletteChoices()
 	WM._commandPalette:choices(choices)
+	previousChoicesCount = #choices
 	WM._commandPalette:query("") -- Clear search text from previous invocation
 	WM._commandPalette:show()
 end
@@ -2653,6 +2701,12 @@ local function setupUI()
 	WM._commandPalette:queryChangedCallback(function(query)
 		local choices = buildCommandPaletteChoices(query)
 		WM._commandPalette:choices(choices)
+
+		-- Reset selection to first item if results changed
+		if #choices ~= previousChoicesCount then
+			WM._commandPalette:selectedRow(1)
+			previousChoicesCount = #choices
+		end
 	end)
 
 	WM._commandPalette:bgDark(true)
