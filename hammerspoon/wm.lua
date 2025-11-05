@@ -213,6 +213,22 @@ local function focusWindow(w, callback)
 			if wasEnhanced then
 				axApp.AXEnhancedUserInterface = true
 			end
+
+			-- Clear urgency for focused window
+			local winId = w:id()
+			if state.urgentWindows[winId] then
+				state.urgentWindows[winId] = nil
+				print("[urgency] Cleared urgency for window " .. winId)
+				updateMenubar()
+
+				-- Refresh command palette if it's visible
+				if WM._commandPalette and WM._commandPalette:isVisible() then
+					local currentQuery = WM._commandPalette:query()
+					local choices = buildCommandPaletteChoices(currentQuery)
+					WM._commandPalette:choices(choices)
+				end
+			end
+
 			if callback then
 				callback()
 			end
@@ -1927,12 +1943,6 @@ function WM:switchToSpace(spaceId)
 		-- Bring window into view BEFORE focusing, so macOS can actually focus it
 		bringIntoView(nextWindow)
 
-		-- Clear urgency for the window we're about to focus
-		if state.urgentWindows[nextWindowId] then
-			state.urgentWindows[nextWindowId] = nil
-			WM.log.df("[urgency] Cleared urgency for window %d", nextWindowId)
-		end
-
 		focusWindow(nextWindow, function()
 			addToWindowStack(nextWindow)
 			centerMouseInWindow(nextWindow)
@@ -2198,6 +2208,19 @@ end
 
 function WM:clearWindowUrgent(winId)
 	self:setWindowUrgent(winId, false)
+end
+
+function WM:debugUrgentWindows()
+	print("=== Urgent Windows Debug ===")
+	for winId, _ in pairs(state.urgentWindows) do
+		local win = getWindow(winId)
+		if win then
+			print(string.format("  Window %d: %s (exists)", winId, win:title()))
+		else
+			print(string.format("  Window %d: (DEAD WINDOW)", winId))
+		end
+	end
+	print("===========================")
 end
 
 function WM:setCurrentWindowUrgent()
