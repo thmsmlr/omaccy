@@ -199,7 +199,7 @@ local function focusWindow(w, callback)
 			return
 		end
 		local app = w:application()
-		app:activate(true)
+		w:raise() -- Only raise this specific window, not all app windows
 		local axApp = hs.axuielement.applicationElement(app)
 		local wasEnhanced = axApp.AXEnhancedUserInterface
 		if Window.focusedWindow() ~= w then
