@@ -277,15 +277,15 @@ local function updateZOrder(cols, focusedWindowId)
 	end
 
 	local totalWindowCount = #flatten(cols)
-	local screenId, _, focusedColIdx = locateWindow(focusedWindowId)
-	if not focusedColIdx or not screenId then
+	local _, _, focusedColIdx = locateWindow(focusedWindowId)
+	if not focusedColIdx then
 		return
 	end
-	local screenFrame = Screen(screenId):frame()
 
 	-- Build desired front-to-back order
 	local ordered = {}
 
+	-- Helper to append all windows from a column (optionally skipping one)
 	local function appendColumn(colIdx, skipId)
 		local col = cols[colIdx]
 		if not col then
@@ -298,69 +298,27 @@ local function updateZOrder(cols, focusedWindowId)
 		end
 	end
 
-	table.insert(ordered, focusedWindowId) -- 1) focused window
-	appendColumn(focusedColIdx, focusedWindowId) -- 2) rest of its column
+	-- 1. Focused window
+	table.insert(ordered, focusedWindowId)
 
-	local offset = 1 -- 3) neighbouring columns
+	-- 2. Other rows in the same column
+	appendColumn(focusedColIdx, focusedWindowId)
+
+	-- 3. Columns farther from focus: left-1, right-1, left-2, right-2, …
+	local offset = 1
 	while #ordered < totalWindowCount do
 		local leftIdx = focusedColIdx - offset
 		local rightIdx = focusedColIdx + offset
-
-		-- For the immediate neighbours we may need to swap priority based on
-		-- whether either neighbour is clamped against the screen edge.
-		if offset == 1 then
-			local function isClamped(idx, side)
-				if idx < 1 or idx > #cols then
-					return false
-				end
-				local firstWinId = cols[idx][1]
-				if not firstWinId then
-					return false
-				end
-				local f = getWindow(firstWinId):frame()
-				if side == "left" then
-					return f.x <= screenFrame.x + 1
-				end
-				if side == "right" then
-					return (f.x + f.w) >= (screenFrame.x + screenFrame.w - 1)
-				end
-				return false
-			end
-
-			local leftClamped = isClamped(leftIdx, "left")
-			local rightClamped = isClamped(rightIdx, "right")
-
-			-- Default ordering is left then right. If the left column is clamped
-			-- we want the right column to appear in front, so we reverse the
-			-- order.  When the right column is clamped, the default ordering is
-			-- already correct, so no change is needed.
-			if leftClamped and not rightClamped then
-				if rightIdx <= #cols then
-					appendColumn(rightIdx)
-				end
-				if leftIdx >= 1 then
-					appendColumn(leftIdx)
-				end
-			else
-				if leftIdx >= 1 then
-					appendColumn(leftIdx)
-				end
-				if rightIdx <= #cols then
-					appendColumn(rightIdx)
-				end
-			end
-		else
-			if leftIdx >= 1 then
-				appendColumn(leftIdx)
-			end
-			if rightIdx <= #cols then
-				appendColumn(rightIdx)
-			end
+		if leftIdx >= 1 then
+			appendColumn(leftIdx)
+		end
+		if rightIdx <= #cols then
+			appendColumn(rightIdx)
 		end
 		offset = offset + 1
 	end
 
-	-- Current positions in the global z-stack (front = small index)
+	-- Current z-order for our tiled windows (front-to-back)
 	local currentPos = {}
 	do
 		local wanted = {}
@@ -378,18 +336,20 @@ local function updateZOrder(cols, focusedWindowId)
 		end
 	end
 
-	-- Raise back→front, but only if relative order is wrong
-	local minFront = math.huge
+	-- Walk desired order back→front, raising only when needed
+	local minFront = math.huge -- frontmost index seen so far
 	for i = #ordered, 1, -1 do
 		local id = ordered[i]
 		local pos = currentPos[id] or math.huge
 
-		if pos > minFront then -- behind something it should front-run
+		-- If this window is currently *behind* something that should be
+		-- behind it, lift it; otherwise leave it where it is.
+		if pos > minFront then
 			local w = getWindow(id)
 			if w then
 				w:raise()
 			end
-			minFront = 0
+			minFront = 0 -- now frontmost
 		else
 			if pos < minFront then
 				minFront = pos
@@ -404,53 +364,6 @@ local function framesDiffer(f1, f2, tolerance)
 		or math.abs(f1.y - f2.y) > tolerance
 		or math.abs(f1.w - f2.w) > tolerance
 		or math.abs(f1.h - f2.h) > tolerance
-end
-
--- Check if a screen has any neighboring screens nearby
--- Returns true if there are screens within proximity threshold
-local function screenHasNeighbors(screenId)
-	local screen = Screen(screenId)
-	if not screen then
-		return false
-	end
-
-	local frame = screen:frame()
-	local allScreens = Screen.allScreens()
-
-	-- If only one screen exists, no neighbors possible
-	if #allScreens <= 1 then
-		return false
-	end
-
-	-- Check if any other screen is close enough to be considered a neighbor
-	-- We consider screens neighbors if their edges are within 50 pixels of each other
-	local proximityThreshold = 50
-
-	for _, otherScreen in ipairs(allScreens) do
-		if otherScreen:id() ~= screenId then
-			local otherFrame = otherScreen:frame()
-
-			-- Check horizontal proximity (screens side by side)
-			-- Right edge of current screen near left edge of other screen
-			local rightToLeft = math.abs((frame.x + frame.w) - otherFrame.x)
-			-- Left edge of current screen near right edge of other screen
-			local leftToRight = math.abs(frame.x - (otherFrame.x + otherFrame.w))
-
-			-- Check vertical proximity (screens stacked)
-			-- Bottom edge of current screen near top edge of other screen
-			local bottomToTop = math.abs((frame.y + frame.h) - otherFrame.y)
-			-- Top edge of current screen near bottom edge of other screen
-			local topToBottom = math.abs(frame.y - (otherFrame.y + otherFrame.h))
-
-			-- If any edge is within threshold, they're neighbors
-			if rightToLeft < proximityThreshold or leftToRight < proximityThreshold or
-			   bottomToTop < proximityThreshold or topToBottom < proximityThreshold then
-				return true
-			end
-		end
-	end
-
-	return false
 end
 
 local function retile(state, screenId, spaceId, opts)
@@ -469,16 +382,9 @@ local function retile(state, screenId, spaceId, opts)
 	local h = screenFrame.h
 	local x = screenFrame.x + state.startXForScreenAndSpace[screenId][spaceId]
 
-	-- Determine clipping margin based on screen neighbors
-	-- If screen has neighbors, clip at 50% to prevent macOS from moving windows to adjacent screens
-	-- If no neighbors, clip more aggressively (almost fully offscreen) for cleaner appearance
-	local hasNeighbors = screenHasNeighbors(screenId)
+	-- Always clip at 50% for symmetric coverflow-style effect
 	local function getClipMargin(windowWidth)
-		if hasNeighbors then
-			return windowWidth / 2  -- Clip at 50% (current behavior)
-		else
-			return windowWidth - 1  -- Clip almost fully (only 1px visible)
-		end
+		return windowWidth / 2
 	end
 
 	local targetColIdx = nil
