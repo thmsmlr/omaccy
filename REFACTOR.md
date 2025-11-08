@@ -102,21 +102,21 @@ hammerspoon/
 - [x] Test: Space switching works correctly
 - [x] Test: Window stack navigation works
 
-### Phase 2: Extract Windows Utilities
-- [ ] Create `wm/windows.lua`
-- [ ] Move window caching (`getWindow()`, `_windows`)
-- [ ] Move window validation (`isValidWindow()`)
-- [ ] Move window location (`locateWindow()`)
-- [ ] Move window focusing (`focusWindow()`)
-- [ ] Move window stack operations (`cleanWindowStack()`, `addToWindowStack()`, `getWindowStackIndex()`)
-- [ ] Move z-order management (`updateZOrder()`)
-- [ ] Move geometry utilities (`framesDiffer()`)
-- [ ] Move mouse utilities (`centerMouseInWindow()`)
-- [ ] Move helper utilities (`flatten()`, `earliestIndexInList()`)
-- [ ] Update wm.lua and state.lua to use Windows module
-- [ ] Test: Window focusing works with retry logic
-- [ ] Test: Window stack navigation preserves order
-- [ ] Test: Z-order updates correctly
+### Phase 2: Extract Windows Utilities ✅
+- [x] Create `wm/windows.lua`
+- [x] Move window caching (`getWindow()`, `_windows`)
+- [x] Move window validation (used in cleanWindowStack)
+- [x] Move window location (`locateWindow()`)
+- [x] Move window focusing (`focusWindow()`)
+- [x] Move window stack operations (`cleanWindowStack()`, `addToWindowStack()`, `getWindowStackIndex()`)
+- [x] Move z-order management (`updateZOrder()`)
+- [x] Move geometry utilities (`framesDiffer()`)
+- [x] Move mouse utilities (`centerMouseInWindow()`)
+- [x] Move helper utilities (`flatten()`, `earliestIndexInList()`)
+- [x] Update wm.lua to use Windows module via convenience aliases
+- [x] Test: Window focusing works with retry logic
+- [x] Test: Window stack navigation preserves order
+- [x] Test: State persistence across reloads
 
 ### Phase 3: Extract Tiling Engine
 - [ ] Create `wm/tiling.lua`
