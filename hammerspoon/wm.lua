@@ -1127,6 +1127,16 @@ local function updateMenubar()
 	end
 	local title = table.concat(titleParts, "|")
 
+	-- Add asterisk prefix if any windows are marked urgent
+	local hasUrgent = false
+	for _, _ in pairs(state.urgentWindows) do
+		hasUrgent = true
+		break
+	end
+	if hasUrgent then
+		title = "* " .. title
+	end
+
 	-- Create menu for switching spaces on the current screen
 	local currentScreen = Mouse.getCurrentScreen()
 	local currentScreenId = currentScreen:id()
