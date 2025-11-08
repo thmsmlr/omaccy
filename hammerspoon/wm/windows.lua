@@ -121,6 +121,13 @@ function Windows.focusWindow(w, callback)
 				end
 			end
 
+			-- Update Z-order to ensure all windows in the focused column are properly raised
+			local screenId, spaceId = Windows.locateWindow(winId)
+			if screenId and spaceId and state.screens[screenId] and state.screens[screenId][spaceId] then
+				local cols = state.screens[screenId][spaceId].cols
+				Windows.updateZOrder(cols, winId)
+			end
+
 			if callback then
 				callback()
 			end
