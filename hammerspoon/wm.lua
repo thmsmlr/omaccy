@@ -36,6 +36,7 @@ WM.State = dofile(hs.configdir .. "/wm/state.lua")
 WM.Windows = dofile(hs.configdir .. "/wm/windows.lua")
 WM.Tiling = dofile(hs.configdir .. "/wm/tiling.lua")
 WM.Spaces = dofile(hs.configdir .. "/wm/spaces.lua")
+WM.Urgency = dofile(hs.configdir .. "/wm/urgency.lua")
 
 -- Get state reference from State module
 local state = WM.State.get()
@@ -182,6 +183,11 @@ local getUrgentWindowsInSpace = function(...) return WM.Spaces.getUrgentWindowsI
 local isSpaceUrgent = function(...) return WM.Spaces.isSpaceUrgent(...) end
 local buildSpaceList = function(...) return WM.Spaces.buildSpaceList(...) end
 
+-- Convenience aliases for Urgency module functions
+local setWindowUrgent = function(...) return WM.Urgency.setWindowUrgent(...) end
+local clearWindowUrgent = function(...) return WM.Urgency.clearWindowUrgent(...) end
+local hasUrgentWindows = function(...) return WM.Urgency.hasUrgentWindows(...) end
+
 
 ------------------------------------------
 -- Command palette helpers
@@ -252,6 +258,15 @@ local function buildCommandPaletteChoices(query)
 	return {}
 end
 
+-- Helper to update command palette if visible
+local function updateCommandPalette()
+	if WM._commandPalette and WM._commandPalette:isVisible() then
+		local currentQuery = WM._commandPalette:query()
+		local choices = buildCommandPaletteChoices(currentQuery)
+		WM._commandPalette:choices(choices)
+	end
+end
+
 local function updateMenubar()
 	if not WM._menubar then
 		return
@@ -280,12 +295,7 @@ local function updateMenubar()
 	local title = table.concat(titleParts, "|")
 
 	-- Add asterisk prefix if any windows are marked urgent
-	local hasUrgent = false
-	for _, _ in pairs(state.urgentWindows) do
-		hasUrgent = true
-		break
-	end
-	if hasUrgent then
+	if hasUrgentWindows() then
 		title = "* " .. title
 	end
 
@@ -384,16 +394,7 @@ WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appNam
 	-- Clear urgency for focused window
 	local winId = win:id()
 	if state.urgentWindows[winId] then
-		state.urgentWindows[winId] = nil
-		print("[urgency] Cleared urgency for window " .. winId)
-		updateMenubar()
-
-		-- Refresh command palette if it's visible
-		if WM._commandPalette and WM._commandPalette:isVisible() then
-			local currentQuery = WM._commandPalette:query()
-			local choices = buildCommandPaletteChoices(currentQuery)
-			WM._commandPalette:choices(choices)
-		end
+		clearWindowUrgent(winId)
 	end
 
 	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
@@ -1219,69 +1220,29 @@ end
 -- Urgency methods
 ------------------------------------------
 
+-- Delegate urgency methods to Urgency module
 function WM:setWindowUrgent(winId, urgent)
-	if urgent then
-		state.urgentWindows[winId] = true
-		print("[urgency] Window " .. winId .. " marked urgent")
-	else
-		state.urgentWindows[winId] = nil
-		print("[urgency] Window " .. winId .. " urgency cleared")
-	end
-	updateMenubar()
-
-	-- Refresh command palette if it's visible
-	if WM._commandPalette and WM._commandPalette:isVisible() then
-		local currentQuery = WM._commandPalette:query()
-		local choices = buildCommandPaletteChoices(currentQuery)
-		WM._commandPalette:choices(choices)
-	end
+	return WM.Urgency.setWindowUrgent(winId, urgent)
 end
 
 function WM:clearWindowUrgent(winId)
-	self:setWindowUrgent(winId, false)
+	return WM.Urgency.clearWindowUrgent(winId)
 end
 
 function WM:debugUrgentWindows()
-	print("=== Urgent Windows Debug ===")
-	for winId, _ in pairs(state.urgentWindows) do
-		local win = getWindow(winId)
-		if win then
-			print(string.format("  Window %d: %s (exists)", winId, win:title()))
-		else
-			print(string.format("  Window %d: (DEAD WINDOW)", winId))
-		end
-	end
-	print("===========================")
+	return WM.Urgency.debugUrgentWindows()
 end
 
 function WM:setCurrentWindowUrgent()
-	local win = Window.focusedWindow()
-	if win then
-		self:setWindowUrgent(win:id(), true)
-	end
+	return WM.Urgency.setCurrentWindowUrgent()
 end
 
 function WM:setUrgentByApp(appName)
-	local app = Application.get(appName)
-	if not app then
-		print("[urgency] Application not found: " .. appName)
-		return
-	end
-
-	local count = 0
-	for _, win in ipairs(app:allWindows()) do
-		if win:isStandard() and win:isVisible() then
-			self:setWindowUrgent(win:id(), true)
-			count = count + 1
-		end
-	end
-	print("[urgency] Marked " .. count .. " windows urgent for app: " .. appName)
+	return WM.Urgency.setUrgentByApp(appName)
 end
 
 function WM:clearAllUrgent()
-	state.urgentWindows = {}
-	print("[urgency] Cleared all urgent windows")
-	updateMenubar()
+	return WM.Urgency.clearAllUrgent()
 end
 
 function WM:scroll(direction, opts)
@@ -1556,10 +1517,13 @@ function WM:init()
 	-- 4. Initialize Spaces module
 	WM.Spaces.init(WM)
 
-	-- 5. Clean window stack
+	-- 5. Initialize Urgency module
+	WM.Urgency.init(WM, state, WM.Windows, updateMenubar, updateCommandPalette)
+
+	-- 6. Clean window stack
 	cleanWindowStack()
 
-	-- 6. Retile all spaces
+	-- 7. Retile all spaces
 	print("[init] Retiling all spaces")
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
@@ -1571,13 +1535,13 @@ function WM:init()
 		end
 	end
 
-	-- 7. Setup UI
+	-- 8. Setup UI
 	setupUI()
 
-	-- 8. Set UI callbacks for Windows module
+	-- 9. Set UI callbacks for Windows module
 	WM.Windows.setUICallbacks(updateMenubar, buildCommandPaletteChoices)
 
-	-- 9. Add focused window to stack
+	-- 10. Add focused window to stack
 	addToWindowStack(Window.focusedWindow())
 
 	print("[init] Initialization complete")

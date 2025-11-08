@@ -144,16 +144,17 @@ hammerspoon/
 - [x] Test: Fuzzy matching finds correct spaces
 - [x] Test: MRU order is correct
 
-### Phase 5: Extract Urgency Module
-- [ ] Create `wm/urgency.lua`
-- [ ] Move urgency state management
-- [ ] Move `setWindowUrgent()`, `clearWindowUrgent()`
-- [ ] Move `setCurrentWindowUrgent()`, `setUrgentByApp()`
-- [ ] Move `clearAllUrgent()`, `debugUrgentWindows()`
-- [ ] Update wm.lua to use Urgency module
-- [ ] Test: Urgency indicators show correctly
-- [ ] Test: Clearing urgency on focus works
-- [ ] Test: Menubar updates with urgency
+### Phase 5: Extract Urgency Module ✅
+- [x] Create `wm/urgency.lua`
+- [x] Move urgency state management
+- [x] Move `setWindowUrgent()`, `clearWindowUrgent()`
+- [x] Move `setCurrentWindowUrgent()`, `setUrgentByApp()`
+- [x] Move `clearAllUrgent()`, `debugUrgentWindows()`
+- [x] Add `hasUrgentWindows()` helper function
+- [x] Update wm.lua to use Urgency module
+- [x] Test: Urgency indicators show correctly
+- [x] Test: Clearing urgency on focus works
+- [x] Test: Menubar updates with urgency
 
 ### Phase 6: Extract UI Module
 - [ ] Create `wm/ui.lua`
