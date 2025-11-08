@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mark the terminal window as urgent by matching TTY
+#
+# Strategy:
+# 1. Find the TTY of the current shell session (via parent process)
+# 2. Find which Ghostty window has processes running on that TTY
+# 3. Mark that window urgent
+
+# Get the TTY from our parent process tree
+# Walk up the process tree until we find one with a TTY
+get_tty() {
+    local pid=$$
+    local max_depth=10
+    local depth=0
+
+    while [ $depth -lt $max_depth ]; do
+        local tty=$(ps -p $pid -o tty= 2>/dev/null | tr -d ' ')
+        if [ -n "$tty" ] && [ "$tty" != "??" ]; then
+            echo "$tty"
+            return 0
+        fi
+        # Get parent PID
+        pid=$(ps -p $pid -o ppid= 2>/dev/null | tr -d ' ')
+        if [ -z "$pid" ] || [ "$pid" = "1" ]; then
+            break
+        fi
+        ((depth++))
+    done
+    return 1
+}
+
+TTY=$(get_tty)
+
+if [ -z "$TTY" ]; then
+    echo "[urgent] Error: Could not determine TTY"
+    exit 1
+fi
+
+echo "[urgent] Found TTY: $TTY"
+
+# Now find all PIDs running on this TTY
+# Use lsof to find processes with this TTY open
+PIDS=$(lsof -t "/dev/$TTY" 2>/dev/null | tr '\n' ' ' || true)
+
+if [ -z "$PIDS" ]; then
+    echo "[urgent] Error: No processes found on TTY $TTY"
+    exit 1
+fi
+
+echo "[urgent] PIDs on $TTY: $PIDS"
+
+# Now find which Ghostty window owns processes on this TTY
+# Get all Ghostty windows and their PIDs, then check if any of our TTY PIDs
+# are children of a Ghostty window's main process
+
+hs -c "
+local tty = '$TTY'
+local ttyPids = {}
+for pid in string.gmatch('$PIDS', '%S+') do
+    ttyPids[tonumber(pid)] = true
+end
+
+-- Function to check if targetPid is an ancestor of childPid
+-- Walks up the parent tree from childPid
+local function isAncestorOf(targetPid, childPid)
+    local current = childPid
+    local maxDepth = 20
+    local depth = 0
+
+    while current and current > 1 and depth < maxDepth do
+        if current == targetPid then
+            return true
+        end
+
+        -- Get parent PID
+        local handle = io.popen('ps -p ' .. current .. ' -o ppid= 2>/dev/null')
+        if not handle then break end
+
+        local ppid = handle:read('*a')
+        handle:close()
+
+        ppid = tonumber(ppid:match('%d+'))
+        if not ppid or ppid == current then
+            break
+        end
+
+        current = ppid
+        depth = depth + 1
+    end
+
+    return false
+end
+
+-- Get all Ghostty windows
+local windows = hs.window.allWindows()
+for _, win in ipairs(windows) do
+    if win:application():name() == 'Ghostty' then
+        local winId = win:id()
+        local appPid = win:application():pid()
+
+        -- Check if this Ghostty window is an ancestor of any TTY PIDs
+        for ttyPid, _ in pairs(ttyPids) do
+            if ttyPid == appPid or isAncestorOf(appPid, ttyPid) then
+                WM:setWindowUrgent(winId, true)
+                print('[urgent] Marked window ' .. winId .. ' as urgent (title: ' .. win:title() .. ', matched TTY: ' .. tty .. ', PID: ' .. ttyPid .. ')')
+                return
+            end
+        end
+    end
+end
+
+print('[urgent] Warning: Could not find Ghostty window for TTY: ' .. tty)
+"
+
+exit 0
