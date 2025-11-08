@@ -156,18 +156,19 @@ hammerspoon/
 - [x] Test: Clearing urgency on focus works
 - [x] Test: Menubar updates with urgency
 
-### Phase 6: Extract UI Module
-- [ ] Create `wm/ui.lua`
-- [ ] Move command palette implementation (`setupUI()` portions)
-- [ ] Move menubar implementation (`updateMenubar()`)
-- [ ] Move choice building (`buildCommandPaletteChoices()`)
-- [ ] Move mode management (commandPaletteMode state)
-- [ ] Update wm.lua to use UI module
-- [ ] Test: Command palette opens and closes
-- [ ] Test: Space creation from palette works
-- [ ] Test: Window moving from palette works
-- [ ] Test: Space renaming from palette works
-- [ ] Test: Menubar updates correctly
+### Phase 6: Extract UI Module ✅
+- [x] Create `wm/ui.lua`
+- [x] Move command palette implementation (`setupUI()` portions)
+- [x] Move menubar implementation (`updateMenubar()`)
+- [x] Move choice building (`buildCommandPaletteChoices()`)
+- [x] Move mode management (commandPaletteMode state)
+- [x] Update wm.lua to use UI module
+- [x] Fix initialization order (UI before Urgency, menubar after Urgency)
+- [x] Test: Command palette opens and closes
+- [x] Test: Space creation from palette works
+- [x] Test: Window moving from palette works
+- [x] Test: Space renaming from palette works
+- [x] Test: Menubar updates correctly
 
 ### Phase 7: Extract Events & Actions
 - [ ] Create `wm/events.lua`

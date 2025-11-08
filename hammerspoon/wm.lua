@@ -37,13 +37,10 @@ WM.Windows = dofile(hs.configdir .. "/wm/windows.lua")
 WM.Tiling = dofile(hs.configdir .. "/wm/tiling.lua")
 WM.Spaces = dofile(hs.configdir .. "/wm/spaces.lua")
 WM.Urgency = dofile(hs.configdir .. "/wm/urgency.lua")
+WM.UI = dofile(hs.configdir .. "/wm/ui.lua")
 
 -- Get state reference from State module
 local state = WM.State.get()
-
--- Command palette state (not persisted)
-local commandPaletteMode = "root" -- "root" or "moveWindowToSpace"
-local previousChoicesCount = 0
 
 --[[
 
@@ -154,9 +151,6 @@ Other TODOs:
 -- Helpers
 ------------------------------------------
 
-local updateMenubar
-local buildCommandPaletteChoices
-
 -- Convenience aliases for Windows module functions
 local getWindow = function(...) return WM.Windows.getWindow(...) end
 local cleanWindowStack = function(...) return WM.Windows.cleanWindowStack(...) end
@@ -188,201 +182,17 @@ local setWindowUrgent = function(...) return WM.Urgency.setWindowUrgent(...) end
 local clearWindowUrgent = function(...) return WM.Urgency.clearWindowUrgent(...) end
 local hasUrgentWindows = function(...) return WM.Urgency.hasUrgentWindows(...) end
 
+-- Convenience aliases for UI module functions
+local updateMenubar = function(...) return WM.UI.updateMenubar(...) end
+local updateCommandPalette = function(...) return WM.UI.getUpdateCommandPalette()(...) end
+
 
 ------------------------------------------
--- Command palette helpers
+-- Window event handlers
 ------------------------------------------
-
-
-local function buildCommandPaletteChoices(query)
-	query = query or ""
-
-	if commandPaletteMode == "root" then
-		-- Root menu: show spaces directly for switching, plus additional commands
-		local choices = buildSpaceList(query, "switchSpace")
-
-		-- Add "Rename space" command
-		table.insert(choices, {
-			text = "Rename space",
-			subText = "Rename the current space",
-			actionType = "navigateToRenameSpace",
-			valid = false, -- Don't close chooser when selected
-		})
-
-		-- Add "Move window to space" command
-		table.insert(choices, {
-			text = "Move window to space",
-			subText = "Move focused window to another space",
-			actionType = "navigateToMoveWindow",
-			valid = false, -- Don't close chooser when selected
-		})
-
-		return choices
-	elseif commandPaletteMode == "moveWindowToSpace" then
-		-- Show space list with "move window to space" action
-		local choices = buildSpaceList(query, "moveWindowToSpace")
-
-		return choices
-	elseif commandPaletteMode == "renameSpace" then
-		-- Show option to rename current space to the query
-		local choices = {}
-
-		-- Get current space info
-		local currentScreen = Mouse.getCurrentScreen()
-		local currentScreenId = currentScreen:id()
-		local currentSpaceId = state.activeSpaceForScreen[currentScreenId]
-
-		if query ~= "" then
-			-- Show "Rename to: {query}" option
-			table.insert(choices, {
-				text = "Rename to: " .. query,
-				subText = "Rename current space '" .. tostring(currentSpaceId) .. "' to '" .. query .. "'",
-				actionType = "renameSpace",
-				newSpaceId = query,
-				oldSpaceId = currentSpaceId,
-				screenId = currentScreenId,
-			})
-		else
-			-- Show instruction when no query
-			table.insert(choices, {
-				text = "Type new name for space '" .. tostring(currentSpaceId) .. "'",
-				subText = "Current space will be renamed",
-				actionType = "instruction",
-				valid = false,
-			})
-		end
-
-		return choices
-	end
-
-	return {}
-end
-
--- Helper to update command palette if visible
-local function updateCommandPalette()
-	if WM._commandPalette and WM._commandPalette:isVisible() then
-		local currentQuery = WM._commandPalette:query()
-		local choices = buildCommandPaletteChoices(currentQuery)
-		WM._commandPalette:choices(choices)
-	end
-end
-
-local function updateMenubar()
-	if not WM._menubar then
-		return
-	end
-
-	-- Get all screens sorted by x position (left to right)
-	local screens = Screen.allScreens()
-	table.sort(screens, function(a, b)
-		return a:frame().x < b:frame().x
-	end)
-
-	-- Build title showing each screen's active space (e.g., "1|2")
-	local titleParts = {}
-	for _, screen in ipairs(screens) do
-		local screenId = screen:id()
-		local spaceId = state.activeSpaceForScreen[screenId] or 1
-		-- For named spaces, show abbreviated name or first 3 chars
-		local displayText
-		if type(spaceId) == "string" then
-			displayText = string.sub(spaceId, 1, 3)
-		else
-			displayText = tostring(spaceId)
-		end
-		table.insert(titleParts, displayText)
-	end
-	local title = table.concat(titleParts, "|")
-
-	-- Add asterisk prefix if any windows are marked urgent
-	if hasUrgentWindows() then
-		title = "* " .. title
-	end
-
-	-- Create menu for switching spaces on the current screen
-	local currentScreen = Mouse.getCurrentScreen()
-	local currentScreenId = currentScreen:id()
-	local currentSpaceId = state.activeSpaceForScreen[currentScreenId] or 1
-
-	local menu = {}
-
-	-- Collect all spaces on the current screen that have windows
-	local spacesWithWindows = {}
-	if state.screens[currentScreenId] then
-		for spaceId, space in pairs(state.screens[currentScreenId]) do
-			-- Count windows in this space
-			local windowCount = 0
-			if space.cols then
-				for _, col in ipairs(space.cols) do
-					windowCount = windowCount + #col
-				end
-			end
-			if space.floating then
-				windowCount = windowCount + #space.floating
-			end
-
-			-- Only include spaces that have windows
-			if windowCount > 0 then
-				table.insert(spacesWithWindows, spaceId)
-			end
-		end
-	end
-
-	-- Sort spaces: numbers first, then strings alphabetically
-	table.sort(spacesWithWindows, function(a, b)
-		local aIsNum = type(a) == "number"
-		local bIsNum = type(b) == "number"
-		if aIsNum ~= bIsNum then
-			return aIsNum -- numbers before strings
-		end
-		return tostring(a) < tostring(b)
-	end)
-
-	-- Build menu items
-	for _, spaceId in ipairs(spacesWithWindows) do
-		local checked = (spaceId == currentSpaceId)
-		local title
-		if type(spaceId) == "string" then
-			title = spaceId -- Named space: show the name
-		else
-			title = "Space " .. spaceId -- Numbered space
-		end
-
-		table.insert(menu, {
-			title = title,
-			checked = checked,
-			fn = function()
-				WM:switchToSpace(spaceId)
-			end,
-		})
-	end
-
-	WM._menubar:setTitle(title)
-	WM._menubar:setMenu(menu)
-end
-
-function WM:showCommandPalette()
-	if not WM._commandPalette then
-		return
-	end
-
-	-- Reset to root mode
-	commandPaletteMode = "root"
-
-	-- Clean window stack before building choices to ensure fresh MRU data
-	cleanWindowStack()
-
-	-- Refresh choices when showing
-	local choices = buildCommandPaletteChoices()
-	WM._commandPalette:choices(choices)
-	previousChoicesCount = #choices
-	WM._commandPalette:query("") -- Clear search text from previous invocation
-	WM._commandPalette:show()
-end
 
 local windowWatcherPaused = false
 WM._windowWatcher = hs.window.filter.new()
-WM._menubar = nil
 
 WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appName, event)
 	if windowWatcherPaused then
@@ -1421,85 +1231,9 @@ function WM:saveState()
 end
 
 -- Setup UI components (menubar and command palette)
-local function setupUI()
-	-- Create menubar space indicator
-	WM._menubar = hs.menubar.new()
-	updateMenubar()
-
-	-- Create command palette (fuzzy finder for commands and spaces)
-	WM._commandPalette = hs.chooser.new(function(choice)
-		if not choice then
-			commandPaletteMode = "root"
-			WM._commandPalette:hide()
-			return
-		end
-
-		local actionType = choice.actionType
-		local targetScreenId = choice.screenId
-		local targetSpaceId = choice.spaceId
-
-		if actionType == "createAndSwitchSpace" then
-			WM:createSpace(targetSpaceId, targetScreenId)
-			local currentScreen = Mouse.getCurrentScreen()
-			if currentScreen:id() ~= targetScreenId then
-				local targetScreen = Screen(targetScreenId)
-				local frame = targetScreen:frame()
-				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
-			end
-			WM:switchToSpace(targetSpaceId)
-		elseif actionType == "createAndMoveWindowToSpace" then
-			WM:createSpace(targetSpaceId, targetScreenId)
-			WM:moveFocusedWindowToSpace(targetSpaceId)
-		elseif actionType == "switchSpace" then
-			local currentScreen = Mouse.getCurrentScreen()
-			if currentScreen:id() ~= targetScreenId then
-				local targetScreen = Screen(targetScreenId)
-				local frame = targetScreen:frame()
-				Mouse.absolutePosition({ x = frame.x + frame.w / 2, y = frame.y + frame.h / 2 })
-			end
-			WM:switchToSpace(targetSpaceId)
-		elseif actionType == "moveWindowToSpace" then
-			WM:moveFocusedWindowToSpace(targetSpaceId)
-		elseif actionType == "renameSpace" then
-			WM:renameSpace(choice.screenId, choice.oldSpaceId, choice.newSpaceId)
-		end
-
-		commandPaletteMode = "root"
-	end)
-
-	WM._commandPalette:invalidCallback(function(choice)
-		if not choice then
-			return
-		end
-
-		local actionType = choice.actionType
-		if actionType == "navigateToMoveWindow" then
-			print("[commandPalette] Navigating to moveWindowToSpace mode")
-			commandPaletteMode = "moveWindowToSpace"
-			WM._commandPalette:query("")
-			local choices = buildCommandPaletteChoices()
-			WM._commandPalette:choices(choices)
-		elseif actionType == "navigateToRenameSpace" then
-			print("[commandPalette] Navigating to renameSpace mode")
-			commandPaletteMode = "renameSpace"
-			WM._commandPalette:query("")
-			local choices = buildCommandPaletteChoices()
-			WM._commandPalette:choices(choices)
-		end
-	end)
-
-	WM._commandPalette:queryChangedCallback(function(query)
-		local choices = buildCommandPaletteChoices(query)
-		WM._commandPalette:choices(choices)
-
-		-- Reset selection to first item if results changed
-		if #choices ~= previousChoicesCount then
-			WM._commandPalette:selectedRow(1)
-			previousChoicesCount = #choices
-		end
-	end)
-
-	WM._commandPalette:bgDark(true)
+-- Delegate showCommandPalette to UI module
+function WM:showCommandPalette()
+	return WM.UI.showCommandPalette()
 end
 
 function WM:init()
@@ -1517,13 +1251,19 @@ function WM:init()
 	-- 4. Initialize Spaces module
 	WM.Spaces.init(WM)
 
-	-- 5. Initialize Urgency module
+	-- 5. Initialize UI module (must come before Urgency since Urgency needs updateMenubar)
+	WM.UI.init(WM, state, WM.Spaces, WM.Urgency, WM.Windows)
+
+	-- 6. Initialize Urgency module
 	WM.Urgency.init(WM, state, WM.Windows, updateMenubar, updateCommandPalette)
 
-	-- 6. Clean window stack
+	-- 6a. Now that Urgency is initialized, update menubar for the first time
+	updateMenubar()
+
+	-- 7. Clean window stack
 	cleanWindowStack()
 
-	-- 7. Retile all spaces
+	-- 8. Retile all spaces
 	print("[init] Retiling all spaces")
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
@@ -1535,11 +1275,8 @@ function WM:init()
 		end
 	end
 
-	-- 8. Setup UI
-	setupUI()
-
 	-- 9. Set UI callbacks for Windows module
-	WM.Windows.setUICallbacks(updateMenubar, buildCommandPaletteChoices)
+	WM.Windows.setUICallbacks(updateMenubar, updateCommandPalette)
 
 	-- 10. Add focused window to stack
 	addToWindowStack(Window.focusedWindow())
