@@ -131,18 +131,18 @@ hammerspoon/
 - [x] Test: Space switching moves windows offscreen
 - [x] Test: Multi-monitor support works
 
-### Phase 4: Extract Spaces Module
-- [ ] Create `wm/spaces.lua`
-- [ ] Move space lookup (`getSpaceForWindow()`)
-- [ ] Move MRU tracking (`getSpaceMRUOrder()`)
-- [ ] Move space list building (`buildSpaceList()`)
-- [ ] Move fuzzy matching logic
-- [ ] Move urgency space helpers (`isSpaceUrgent()`, `getUrgentWindowsInSpace()`)
-- [ ] Update wm.lua to use Spaces module
-- [ ] Test: Space switching works correctly
-- [ ] Test: Command palette space filtering works
-- [ ] Test: Fuzzy matching finds correct spaces
-- [ ] Test: MRU order is correct
+### Phase 4: Extract Spaces Module ✅
+- [x] Create `wm/spaces.lua`
+- [x] Move space lookup (`getSpaceForWindow()`)
+- [x] Move MRU tracking (`getSpaceMRUOrder()`)
+- [x] Move space list building (`buildSpaceList()`)
+- [x] Move fuzzy matching logic
+- [x] Move urgency space helpers (`isSpaceUrgent()`, `getUrgentWindowsInSpace()`)
+- [x] Update wm.lua to use Spaces module
+- [x] Test: Space switching works correctly
+- [x] Test: Command palette space filtering works
+- [x] Test: Fuzzy matching finds correct spaces
+- [x] Test: MRU order is correct
 
 ### Phase 5: Extract Urgency Module
 - [ ] Create `wm/urgency.lua`
