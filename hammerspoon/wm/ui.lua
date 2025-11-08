@@ -84,10 +84,10 @@ end
 
 -- Helper to update command palette if visible
 local function updateCommandPalette()
-	if UI._commandPalette and UI._commandPalette:isVisible() then
-		local currentQuery = UI._commandPalette:query()
+	if UI.commandPalette and UI.commandPalette:isVisible() then
+		local currentQuery = UI.commandPalette:query()
 		local choices = buildCommandPaletteChoices(currentQuery)
-		UI._commandPalette:choices(choices)
+		UI.commandPalette:choices(choices)
 	end
 end
 
@@ -192,7 +192,7 @@ end
 
 -- Show command palette
 function UI.showCommandPalette()
-	if not UI._commandPalette then
+	if not UI.commandPalette then
 		return
 	end
 
@@ -204,10 +204,10 @@ function UI.showCommandPalette()
 
 	-- Refresh choices when showing
 	local choices = buildCommandPaletteChoices()
-	UI._commandPalette:choices(choices)
+	UI.commandPalette:choices(choices)
 	previousChoicesCount = #choices
-	UI._commandPalette:query("") -- Clear search text from previous invocation
-	UI._commandPalette:show()
+	UI.commandPalette:query("") -- Clear search text from previous invocation
+	UI.commandPalette:show()
 end
 
 -- Get reference to updateCommandPalette for callbacks
@@ -229,10 +229,10 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 	UI._menubar = hs.menubar.new()
 
 	-- Create command palette (fuzzy finder for commands and spaces)
-	UI._commandPalette = hs.chooser.new(function(choice)
+	UI.commandPalette = hs.chooser.new(function(choice)
 		if not choice then
 			commandPaletteMode = "root"
-			UI._commandPalette:hide()
+			UI.commandPalette:hide()
 			return
 		end
 
@@ -269,7 +269,7 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 		commandPaletteMode = "root"
 	end)
 
-	UI._commandPalette:invalidCallback(function(choice)
+	UI.commandPalette:invalidCallback(function(choice)
 		if not choice then
 			return
 		end
@@ -278,30 +278,30 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 		if actionType == "navigateToMoveWindow" then
 			print("[commandPalette] Navigating to moveWindowToSpace mode")
 			commandPaletteMode = "moveWindowToSpace"
-			UI._commandPalette:query("")
+			UI.commandPalette:query("")
 			local choices = buildCommandPaletteChoices()
-			UI._commandPalette:choices(choices)
+			UI.commandPalette:choices(choices)
 		elseif actionType == "navigateToRenameSpace" then
 			print("[commandPalette] Navigating to renameSpace mode")
 			commandPaletteMode = "renameSpace"
-			UI._commandPalette:query("")
+			UI.commandPalette:query("")
 			local choices = buildCommandPaletteChoices()
-			UI._commandPalette:choices(choices)
+			UI.commandPalette:choices(choices)
 		end
 	end)
 
-	UI._commandPalette:queryChangedCallback(function(query)
+	UI.commandPalette:queryChangedCallback(function(query)
 		local choices = buildCommandPaletteChoices(query)
-		UI._commandPalette:choices(choices)
+		UI.commandPalette:choices(choices)
 
 		-- Reset selection to first item if results changed
 		if #choices ~= previousChoicesCount then
-			UI._commandPalette:selectedRow(1)
+			UI.commandPalette:selectedRow(1)
 			previousChoicesCount = #choices
 		end
 	end)
 
-	UI._commandPalette:bgDark(true)
+	UI.commandPalette:bgDark(true)
 
 	print("[UI] UI module initialized")
 end

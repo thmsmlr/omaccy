@@ -356,7 +356,7 @@ function WM:init()
 	addToWindowStack(Window.focusedWindow())
 
 	-- 13. Expose command palette for hotkey access
-	WM._commandPalette = WM.UI._commandPalette
+	WM.commandPalette = WM.UI.commandPalette
 
 	print("[init] Initialization complete")
 end

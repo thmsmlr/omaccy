@@ -134,18 +134,18 @@ end)
 
 -- Command Palette (fuzzy finder for commands and spaces) --
 hs.hotkey.bind({ "cmd", "ctrl" }, "`", function()
-	if WM._commandPalette and WM._commandPalette:isVisible() and WM._commandPalette.selectedRow then
+	if WM.commandPalette and WM.commandPalette:isVisible() and WM.commandPalette.selectedRow then
 		-- Cycle to next item
-		local current = WM._commandPalette:selectedRow() or 1
-		local total = WM._commandPalette:rows()
+		local current = WM.commandPalette:selectedRow() or 1
+		local total = WM.commandPalette:rows()
 
 		if total > 0 then
 			local next = (current % total) + 1
-			WM._commandPalette:selectedRow(next)
+			WM.commandPalette:selectedRow(next)
 
 			-- If selection didn't change (hit invalid row), wrap to 1
-			if WM._commandPalette:selectedRow() == current then
-				WM._commandPalette:selectedRow(1)
+			if WM.commandPalette:selectedRow() == current then
+				WM.commandPalette:selectedRow(1)
 			end
 		end
 	else
@@ -155,20 +155,20 @@ hs.hotkey.bind({ "cmd", "ctrl" }, "`", function()
 end)
 
 hs.hotkey.bind({ "cmd", "ctrl", "shift" }, "`", function()
-	if WM._commandPalette and WM._commandPalette:isVisible() and WM._commandPalette.selectedRow then
+	if WM.commandPalette and WM.commandPalette:isVisible() and WM.commandPalette.selectedRow then
 		-- Cycle to previous item
-		local current = WM._commandPalette:selectedRow() or 1
-		local total = WM._commandPalette:rows()
+		local current = WM.commandPalette:selectedRow() or 1
+		local total = WM.commandPalette:rows()
 
 		if total > 0 then
 			local prev = ((current - 2 + total) % total) + 1
-			WM._commandPalette:selectedRow(prev)
+			WM.commandPalette:selectedRow(prev)
 
 			-- If selection didn't change (hit invalid row), find last valid row
-			if WM._commandPalette:selectedRow() == current then
+			if WM.commandPalette:selectedRow() == current then
 				for i = total, 1, -1 do
-					WM._commandPalette:selectedRow(i)
-					if WM._commandPalette:selectedRow() == i then
+					WM.commandPalette:selectedRow(i)
+					if WM.commandPalette:selectedRow() == i then
 						break
 					end
 				end
