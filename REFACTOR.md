@@ -118,18 +118,18 @@ hammerspoon/
 - [x] Test: Window stack navigation preserves order
 - [x] Test: State persistence across reloads
 
-### Phase 3: Extract Tiling Engine
-- [ ] Create `wm/tiling.lua`
-- [ ] Move `retile()` function
-- [ ] Move `retileAll()` orchestration
-- [ ] Move `bringIntoView()` scrolling logic
-- [ ] Move offscreen management (`moveSpaceWindowsOffscreen()`)
-- [ ] Move screen utilities (`getRightmostScreen()`)
-- [ ] Update wm.lua to use Tiling module
-- [ ] Test: Tiling preserves layout correctly
-- [ ] Test: Scrolling brings windows into view
-- [ ] Test: Space switching moves windows offscreen
-- [ ] Test: Multi-monitor support works
+### Phase 3: Extract Tiling Engine ✅
+- [x] Create `wm/tiling.lua`
+- [x] Move `retile()` function
+- [x] Move `retileAll()` orchestration
+- [x] Move `bringIntoView()` scrolling logic
+- [x] Move offscreen management (`moveSpaceWindowsOffscreen()`)
+- [x] Move screen utilities (`getRightmostScreen()`)
+- [x] Update wm.lua to use Tiling module
+- [x] Test: Tiling preserves layout correctly
+- [x] Test: Scrolling brings windows into view
+- [x] Test: Space switching moves windows offscreen
+- [x] Test: Multi-monitor support works
 
 ### Phase 4: Extract Spaces Module
 - [ ] Create `wm/spaces.lua`

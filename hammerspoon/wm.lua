@@ -34,6 +34,7 @@ local json <const> = hs.json
 -- Load submodules
 WM.State = dofile(hs.configdir .. "/wm/state.lua")
 WM.Windows = dofile(hs.configdir .. "/wm/windows.lua")
+WM.Tiling = dofile(hs.configdir .. "/wm/tiling.lua")
 
 -- Get state reference from State module
 local state = WM.State.get()
@@ -57,7 +58,7 @@ This implementation has some key differences that improve the experience:
 
 Underhood the main functions are:
 
-- retile(state, screenId, spaceId, startX) -> tiles the windows on the given screen and space
+- retile(screenId, spaceId, opts) -> tiles the windows on the given screen and space
 
 The state looks like this:
 
@@ -166,183 +167,13 @@ local addToWindowStack = function(...) return WM.Windows.addToWindowStack(...) e
 local flatten = function(...) return WM.Windows.flatten(...) end
 local earliestIndexInList = function(...) return WM.Windows.earliestIndexInList(...) end
 
-local function retile(state, screenId, spaceId, opts)
-	opts = opts or {}
+-- Convenience aliases for Tiling module functions
+local retile = function(...) return WM.Tiling.retile(...) end
+local retileAll = function(...) return WM.Tiling.retileAll(...) end
+local bringIntoView = function(...) return WM.Tiling.bringIntoView(...) end
+local moveSpaceWindowsOffscreen = function(...) return WM.Tiling.moveSpaceWindowsOffscreen(...) end
+local getRightmostScreen = function(...) return WM.Tiling.getRightmostScreen(...) end
 
-	local focusedWindow = Window.focusedWindow()
-	local focusedWindowId = focusedWindow and focusedWindow:id() or nil
-	local cols = state.screens[screenId][spaceId].cols
-	local screen = Screen(screenId)
-	if not cols or #cols == 0 then
-		return
-	end
-
-	local screenFrame = screen:frame()
-	local y = screenFrame.y
-	local h = screenFrame.h
-	local x = screenFrame.x + state.startXForScreenAndSpace[screenId][spaceId]
-
-	-- Always clip at 50% for symmetric coverflow-style effect
-	local function getClipMargin(windowWidth)
-		return windowWidth / 2
-	end
-
-	local targetColIdx = nil
-
-	-- Phase 1: Calculate all target frames and categorize windows
-	local visibleUpdates = {}
-	local offscreenUpdates = {}
-
-	local currentX = x
-	for idx, col in ipairs(cols) do
-		-- Find the maximum width in this column
-		local maxColWidth = 0
-		for _, winId in ipairs(col) do
-			local win = getWindow(winId)
-			if win then
-				local frame = win:frame()
-				if frame.w > maxColWidth then
-					maxColWidth = frame.w
-				end
-			end
-		end
-
-		-- Calculate the height each window should have to fill the column
-		local n = #col
-		local totalGap = WM.tileGap * (n - 1)
-		local availableHeight = screenFrame.h - totalGap
-		local baseHeight = math.floor(availableHeight / n)
-		local remainder = availableHeight - (baseHeight * n) -- Distribute remainder pixels
-
-		local colX = currentX
-		local rowY = y
-		for jdx, winId in ipairs(col) do
-			local win = getWindow(winId)
-			if win then
-				local currentFrame = win:frame()
-				local clipMargin = getClipMargin(maxColWidth)
-				local targetFrame = {
-					x = math.min(
-						math.max(colX, screenFrame.x - clipMargin + 1),
-						screenFrame.x + screenFrame.w - clipMargin - 1
-					),
-					y = rowY,
-					w = maxColWidth,
-					h = baseHeight + ((jdx <= remainder) and 1 or 0),
-				}
-
-				-- Determine if window will be visible on screen
-				-- Only consider "visible" if mostly on screen (not just edge-clipped)
-				local winLeft = targetFrame.x
-				local winRight = targetFrame.x + targetFrame.w
-				local screenLeft = screenFrame.x
-				local screenRight = screenFrame.x + screenFrame.w
-
-				-- Calculate what percentage of the window is actually on screen
-				local visibleLeft = math.max(winLeft, screenLeft)
-				local visibleRight = math.min(winRight, screenRight)
-				local visibleWidth = math.max(0, visibleRight - visibleLeft)
-				local percentVisible = visibleWidth / targetFrame.w
-
-				-- Only consider "visible" if at least 52% is on screen
-				local isVisible = percentVisible > 0.52
-
-				local update = {
-					winId = winId,
-					win = win,
-					currentFrame = currentFrame,
-					targetFrame = targetFrame,
-					isVisible = isVisible,
-					colIdx = idx,
-				}
-
-				if isVisible then
-					table.insert(visibleUpdates, update)
-				else
-					table.insert(offscreenUpdates, update)
-				end
-
-				rowY = rowY + targetFrame.h + WM.tileGap
-				if winId == focusedWindowId then
-					targetColIdx = idx
-				end
-			end
-		end
-		currentX = currentX + maxColWidth + WM.tileGap
-	end
-
-	-- Phase 2: Process visible windows first (user sees these immediately)
-	if not opts.onlyOffscreen then
-		for _, update in ipairs(visibleUpdates) do
-			if framesDiffer(update.currentFrame, update.targetFrame) then
-				if opts.duration then
-					update.win:setFrame(update.targetFrame, opts.duration)
-				else
-					update.win:setFrame(update.targetFrame)
-				end
-			end
-		end
-	end
-
-	-- Phase 3: Process offscreen windows (user doesn't see these)
-	if not opts.onlyVisible then
-		for _, update in ipairs(offscreenUpdates) do
-			if framesDiffer(update.currentFrame, update.targetFrame) then
-				if opts.duration then
-					update.win:setFrame(update.targetFrame, opts.duration)
-				else
-					update.win:setFrame(update.targetFrame)
-				end
-			end
-		end
-	end
-end
-
-local function bringIntoView(win)
-	if not win then
-		return
-	end
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	if not screenId or not spaceId or not colIdx then
-		return
-	end
-
-	local screen = Screen(screenId)
-	if not screen then
-		return
-	end
-	local screenFrame = screen:frame()
-
-	-- Total width (plus gaps) before the target window in the stack
-	local preWidth = 0
-	for i = 1, colIdx - 1 do
-		local winId = state.screens[screenId][spaceId].cols[i][1]
-		local w = getWindow(winId)
-		if w then
-			preWidth = preWidth + w:frame().w + WM.tileGap
-		end
-	end
-
-	-- Current on-screen position of the target window
-	local currentLeft = win:frame().x
-	local currentRight = win:frame().x + win:frame().w
-
-	local newStartX
-	if currentLeft < 0 then
-		newStartX = -preWidth
-	elseif currentRight > screenFrame.w then
-		newStartX = -preWidth + screenFrame.w - win:frame().w
-	else
-		newStartX = -preWidth + currentLeft
-	end
-
-	-- Only retile if startX actually changed
-	local oldStartX = state.startXForScreenAndSpace[screenId][spaceId]
-	state.startXForScreenAndSpace[screenId][spaceId] = newStartX
-	if math.abs(newStartX - oldStartX) > 1 then
-		retile(state, screenId, spaceId)
-	end
-end
 
 ------------------------------------------
 -- Urgency helpers
@@ -424,92 +255,6 @@ local function getSpaceMRUOrder()
 	end
 
 	return order
-end
-
-local function getRightmostScreen()
-	local rightmostScreen = Screen.mainScreen()
-	local maxRight = -math.huge
-	for _, screen in ipairs(Screen.allScreens()) do
-		local frame = screen:frame()
-		local right = frame.x + frame.w
-		if right > maxRight then
-			maxRight = right
-			rightmostScreen = screen
-		end
-	end
-	return rightmostScreen
-end
-
--- Move all windows of the given space on the given screen to the rightmost edge of the rightmost screen
-local function moveSpaceWindowsOffscreen(screenId, spaceId, opts)
-	opts = opts or {}
-	if not state.screens[screenId] or not state.screens[screenId][spaceId] then
-		return
-	end
-
-	local rightmostScreen = getRightmostScreen()
-	local rightFrame = rightmostScreen:frame()
-	local offscreenX = rightFrame.x + rightFrame.w - 1 -- leave 1px visible so macOS doesn't move it
-	local screenFrame = Screen(screenId):frame()
-	local screenLeft = screenFrame.x
-	local screenRight = screenFrame.x + screenFrame.w
-
-	local function processWindow(winId)
-		local win = getWindow(winId)
-		if win and win:isStandard() and win:isVisible() then
-			local f = win:frame()
-
-			-- Check if window is currently visible on screen
-			-- Only consider "visible" if at least 75% is on screen
-			local winLeft = f.x
-			local winRight = f.x + f.w
-			local visibleLeft = math.max(winLeft, screenLeft)
-			local visibleRight = math.min(winRight, screenRight)
-			local visibleWidth = math.max(0, visibleRight - visibleLeft)
-			local percentVisible = visibleWidth / f.w
-			local isCurrentlyVisible = percentVisible > 0.75
-
-			-- Skip based on priority mode
-			if opts.onlyVisible and not isCurrentlyVisible then
-				return
-			end
-			if opts.onlyOffscreen and isCurrentlyVisible then
-				return
-			end
-
-			-- Only move if not already offscreen
-			if math.abs(f.x - offscreenX) > 1 then
-				f.x = offscreenX
-				win:setFrame(f, 0)
-			end
-		end
-	end
-
-	-- Move tiled windows
-	for _, col in ipairs(state.screens[screenId][spaceId].cols) do
-		for _, winId in ipairs(col) do
-			processWindow(winId)
-		end
-	end
-
-	-- Move floating windows if any
-	if state.screens[screenId][spaceId].floating then
-		for _, winId in ipairs(state.screens[screenId][spaceId].floating) do
-			processWindow(winId)
-		end
-	end
-end
-
-local function retileAll(opts)
-	for screenId, spaces in pairs(state.screens) do
-		for spaceId, _ in pairs(spaces) do
-			if state.activeSpaceForScreen[screenId] == spaceId then
-				retile(state, screenId, spaceId, opts)
-			else
-				moveSpaceWindowsOffscreen(screenId, spaceId)
-			end
-		end
-	end
 end
 
 -- Helper: Build space list for switching or moving
@@ -1032,7 +777,7 @@ WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appNam
 		state.activeSpaceForScreen[screenId] = spaceId
 		-- Only retile the affected screen's spaces
 		moveSpaceWindowsOffscreen(screenId, oldSpaceId)
-		retile(state, screenId, spaceId)
+		retile(screenId, spaceId)
 
 		-- Update menubar to reflect space change
 		updateMenubar()
@@ -1070,7 +815,7 @@ WM._windowWatcher:subscribe(hs.window.filter.windowCreated, function(win, appNam
 
 	addToWindowStack(win)
 	cleanWindowStack()
-	-- retile(state, screenId, spaceId)
+	-- retile(screenId, spaceId)
 	retileAll()
 end)
 
@@ -1195,7 +940,7 @@ function WM:navigateStack(direction)
 		-- Switch spaces with zero animation to avoid windows flying across screen
 		state.activeSpaceForScreen[screenId] = spaceId
 		moveSpaceWindowsOffscreen(screenId, currentSpaceId)
-		retile(state, screenId, spaceId, { duration = 0 })
+		retile(screenId, spaceId, { duration = 0 })
 
 		-- Update menubar to reflect space change
 		updateMenubar()
@@ -1351,8 +1096,8 @@ function WM:moveWindowToNextScreen()
 		table.remove(state.screens[currentScreenId][currentSpace].cols, currentColIdx)
 	end
 
-	retile(state, currentScreenId, currentSpace)
-	retile(state, nextScreenId, nextSpace)
+	retile(currentScreenId, currentSpace)
+	retile(nextScreenId, nextSpace)
 end
 
 -- Toggle fullscreen horizontally for the focused window.
@@ -1411,7 +1156,7 @@ function WM:centerWindow()
 	local targetX = (screenFrame.w - win:frame().w) / 2
 	local startX = targetX - preWidth
 	state.startXForScreenAndSpace[screenId][spaceId] = startX
-	retile(state, screenId, spaceId)
+	retile(screenId, spaceId)
 end
 
 function WM:resizeFocusedWindowHorizontally(delta)
@@ -1438,7 +1183,7 @@ function WM:resizeFocusedWindowHorizontally(delta)
 		end
 	end
 
-	-- retile(state, screenId, spaceId)
+	-- retile(screenId, spaceId)
 	bringIntoView(win)
 end
 
@@ -1543,7 +1288,7 @@ function WM:switchToSpace(spaceId)
 
 	-- Phase 1: Move ALL new space windows to their correct positions (not just visible)
 	-- This ensures correctness - all windows are positioned before we raise any
-	retile(state, screenId, spaceId, { duration = 0 })
+	retile(screenId, spaceId, { duration = 0 })
 
 	-- Phase 2: Raise visible windows to top (now they cover old windows)
 	-- Use ONLY win:raise(), not app:activate(), to avoid raising ALL windows of that app
@@ -1664,7 +1409,7 @@ function WM:slurp()
 		end
 	end
 
-	retile(state, screenId, spaceId)
+	retile(screenId, spaceId)
 end
 
 function WM:barf()
@@ -1719,7 +1464,7 @@ function WM:barf()
 		end
 	end
 
-	retile(state, screenId, spaceId)
+	retile(screenId, spaceId)
 end
 
 function WM:moveFocusedWindowToSpace(spaceId)
@@ -1987,7 +1732,7 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
 				state.activeSpaceForScreen[screenId] = spaceId
 				-- Only retile the affected screen's spaces
 				moveSpaceWindowsOffscreen(screenId, currentSpaceId)
-				retile(state, screenId, spaceId)
+				retile(screenId, spaceId)
 
 				-- Update menubar to reflect space change
 				updateMenubar()
@@ -2054,7 +1799,7 @@ function WM:launchOrFocusApp(appName, launchCommand, opts)
 	local function waitAndHandleNewWindow()
 		waitForNewWindow(10, function(newWindow)
 			table.insert(state.screens[targetScreenId][targetSpaceId].cols, targetColIdx, { newWindow:id() })
-			retile(state, targetScreenId, targetSpaceId)
+			retile(targetScreenId, targetSpaceId)
 			focusWindow(newWindow, function()
 				addToWindowStack(newWindow)
 				centerMouseInWindow(newWindow)
@@ -2177,28 +1922,31 @@ function WM:init()
 	-- 2. Initialize Windows module
 	WM.Windows.init(WM)
 
-	-- 3. Clean window stack
+	-- 3. Initialize Tiling module
+	WM.Tiling.init(WM)
+
+	-- 4. Clean window stack
 	cleanWindowStack()
 
-	-- 4. Retile all spaces
+	-- 5. Retile all spaces
 	print("[init] Retiling all spaces")
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
 			if state.activeSpaceForScreen[screenId] == spaceId then
-				retile(state, screenId, spaceId)
+				retile(screenId, spaceId)
 			else
 				moveSpaceWindowsOffscreen(screenId, spaceId)
 			end
 		end
 	end
 
-	-- 5. Setup UI
+	-- 6. Setup UI
 	setupUI()
 
-	-- 6. Set UI callbacks for Windows module
+	-- 7. Set UI callbacks for Windows module
 	WM.Windows.setUICallbacks(updateMenubar, buildCommandPaletteChoices)
 
-	-- 7. Add focused window to stack
+	-- 8. Add focused window to stack
 	addToWindowStack(Window.focusedWindow())
 
 	print("[init] Initialization complete")
