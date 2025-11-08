@@ -1011,7 +1011,7 @@ local function buildSpaceList(query, actionType)
 		choice.mruIndex = mruIndex or math.huge -- Spaces not in MRU go to the end
 	end
 
-	-- Sort: by fuzzy match score (highest first), then urgency, then MRU order
+	-- Sort: by fuzzy match score (highest first), then urgency, then MRU order, then current space last
 	table.sort(choices, function(a, b)
 		-- Compare scores (higher score = better match, should come first)
 		local aScore = a.score or 0
@@ -1024,6 +1024,11 @@ local function buildSpaceList(query, actionType)
 		-- If scores are equal, urgent spaces come first
 		if a.isUrgent ~= b.isUrgent then
 			return a.isUrgent
+		end
+
+		-- Current space comes last (non-current spaces come first)
+		if a.isCurrent ~= b.isCurrent then
+			return b.isCurrent -- if b is current, a comes first (puts current at end)
 		end
 
 		-- Then by MRU order (lower index = more recent = comes first)
