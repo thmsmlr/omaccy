@@ -170,21 +170,21 @@ hammerspoon/
 - [x] Test: Space renaming from palette works
 - [x] Test: Menubar updates correctly
 
-### Phase 7: Extract Events & Actions
-- [ ] Create `wm/events.lua`
-- [ ] Move window watcher setup
-- [ ] Move focus tracking
-- [ ] Move window creation/destruction handlers
-- [ ] Move watcher pause/resume logic
-- [ ] Create `wm/actions.lua`
-- [ ] Move all public `WM:*` methods
-- [ ] Slim down main `wm.lua` to coordination only
-- [ ] Update wm.lua to delegate to Actions module
-- [ ] Test: All hotkeys work
-- [ ] Test: Window creation triggers retile
-- [ ] Test: Window destruction cleans up state
-- [ ] Test: Focus tracking updates stack
-- [ ] Test: All public actions work end-to-end
+### Phase 7: Extract Events & Actions ✅
+- [x] Create `wm/events.lua`
+- [x] Move window watcher setup
+- [x] Move focus tracking
+- [x] Move window creation/destruction handlers
+- [x] Move watcher pause/resume logic
+- [x] Create `wm/actions.lua`
+- [x] Move all public `WM:*` methods
+- [x] Slim down main `wm.lua` to coordination only
+- [x] Update wm.lua to delegate to Actions module
+- [x] Test: All hotkeys work
+- [x] Test: Window creation triggers retile
+- [x] Test: Window destruction cleans up state
+- [x] Test: Focus tracking updates stack
+- [x] Test: All public actions work end-to-end
 
 ## Testing Checklist (Per Phase)
 

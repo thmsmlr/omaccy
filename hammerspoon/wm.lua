@@ -38,6 +38,8 @@ WM.Tiling = dofile(hs.configdir .. "/wm/tiling.lua")
 WM.Spaces = dofile(hs.configdir .. "/wm/spaces.lua")
 WM.Urgency = dofile(hs.configdir .. "/wm/urgency.lua")
 WM.UI = dofile(hs.configdir .. "/wm/ui.lua")
+WM.Events = dofile(hs.configdir .. "/wm/events.lua")
+WM.Actions = dofile(hs.configdir .. "/wm/actions.lua")
 
 -- Get state reference from State module
 local state = WM.State.get()
@@ -188,842 +190,71 @@ local updateCommandPalette = function(...) return WM.UI.getUpdateCommandPalette(
 
 
 ------------------------------------------
--- Window event handlers
+-- Action method delegation to Actions module
 ------------------------------------------
 
-local windowWatcherPaused = false
-WM._windowWatcher = hs.window.filter.new()
-
-WM._windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appName, event)
-	if windowWatcherPaused then
-		return
-	end
-	print("[windowFocused]", win:title(), win:id(), windowWatcherPaused)
-	addToWindowStack(win)
-
-	-- Clear urgency for focused window
-	local winId = win:id()
-	if state.urgentWindows[winId] then
-		clearWindowUrgent(winId)
-	end
-
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
-	if not screenId or not spaceId or not colIdx or not rowIdx then
-		return
-	end
-	if state.activeSpaceForScreen[screenId] ~= spaceId then
-		local oldSpaceId = state.activeSpaceForScreen[screenId]
-		state.activeSpaceForScreen[screenId] = spaceId
-		-- Only retile the affected screen's spaces
-		moveSpaceWindowsOffscreen(screenId, oldSpaceId)
-		retile(screenId, spaceId)
-
-		-- Update menubar to reflect space change
-		updateMenubar()
-	end
-	bringIntoView(win)
-end)
-
--- Subscribe to window created/destroyed events to update state
-
-WM._windowWatcher:subscribe(hs.window.filter.windowCreated, function(win, appName, event)
-	if windowWatcherPaused then
-		return
-	end
-	if not win:isStandard() or not win:isVisible() or win:isFullScreen() then
-		return
-	end
-	print("[windowCreated]", win:title(), win:id())
-
-	-- If the window is already on a screen, don't do anything
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	if screenId ~= nil then
-		return
-	end
-
-	-- Place new window in the current space/column
-	local screen = win:screen()
-	local screenId = screen and screen:id() or Screen.mainScreen():id()
-	local spaceId = state.activeSpaceForScreen[screenId] or 1
-
-	-- Place in a new column at the end
-	local cols = state.screens[screenId][spaceId].cols
-	local colIdx = #cols + 1
-	cols[colIdx] = cols[colIdx] or {}
-	table.insert(cols[colIdx], win:id())
-
-	addToWindowStack(win)
-	cleanWindowStack()
-	-- retile(screenId, spaceId)
-	retileAll()
-end)
-
-WM._windowWatcher:subscribe(hs.window.filter.windowDestroyed, function(win, appName, event)
-	if windowWatcherPaused then
-		return
-	end
-	print("[windowDestroyed]", win:title(), win:id())
-
-	local winId = win:id()
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
-	if not screenId or not spaceId or not colIdx or not rowIdx then
-		return
-	end
-	local col = state.screens[screenId][spaceId].cols[colIdx]
-	if not col then
-		return
-	end
-	for i = #col, 1, -1 do
-		if col[i] == winId then
-			table.remove(col, i)
-			break
-		end
-	end
-	if #col == 0 then
-		table.remove(state.screens[screenId][spaceId].cols, colIdx)
-	end
-
-	-- Auto-cleanup empty named spaces (but preserve numbered spaces 1-4)
-	local space = state.screens[screenId][spaceId]
-	local isEmptySpace = space and #space.cols == 0 and (not space.floating or #space.floating == 0)
-	local isNamedSpace = type(spaceId) == "string"
-
-	if isEmptySpace and isNamedSpace then
-		print("[windowDestroyed]", "Cleaning up empty named space:", spaceId)
-		state.screens[screenId][spaceId] = nil
-		state.startXForScreenAndSpace[screenId][spaceId] = nil
-
-		-- If this was the active space, switch to space 1
-		if state.activeSpaceForScreen[screenId] == spaceId then
-			state.activeSpaceForScreen[screenId] = 1
-			updateMenubar()
-		end
-	end
-
-	-- Clean up the window stack to remove any now-invalid windows
-	cleanWindowStack()
-
-	-- Remove from fullscreenOriginalWidth
-	state.fullscreenOriginalWidth[winId] = nil
-
-	-- Retile all screens/spaces (could optimize to just affected ones)
-	retileAll()
-end)
-
-WM._windowWatcher:subscribe(
-	{ hs.window.filter.windowFullscreened, hs.window.filter.windowUnfullscreened },
-	function(win, appName, event)
-		if windowWatcherPaused then
-			return
-		end
-		retileAll()
-	end
-)
-
 function WM:navigateStack(direction)
-	if direction == "in" then
-		state.windowStackIndex = state.windowStackIndex - 1
-	end
-	if direction == "out" then
-		state.windowStackIndex = state.windowStackIndex + 1
-	end
-	if state.windowStackIndex < 1 then
-		state.windowStackIndex = 1
-	end
-	if state.windowStackIndex > #state.windowStack then
-		state.windowStackIndex = #state.windowStack
-	end
-	local winId = state.windowStack[state.windowStackIndex]
-	if not winId then
-		return
-	end
-	local win = getWindow(winId)
-	if not win then
-		return
-	end
-
-	-- print("--- Navigate window stack ---")
-	-- for i, id in ipairs(state.windowStack) do
-	--     local w = getWindow(id)
-	--     local title = w and w:title() or tostring(id)
-	--     local marker = (i == state.windowStackIndex) and ">" or " "
-	--     print(string.format("%s [%d] %s", marker, i, title))
-	-- end
-
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
-	if not screenId or not spaceId then
-		return
-	end
-	local currentSpaceId = state.activeSpaceForScreen[screenId]
-	local switchingSpaces = (spaceId ~= currentSpaceId)
-
-	if switchingSpaces then
-		-- Calculate correct startX BEFORE switching spaces
-		local screenFrame = Screen(screenId):frame()
-
-		-- Calculate total width before the target window in the stack
-		local preWidth = 0
-		for i = 1, colIdx - 1 do
-			local preWinId = state.screens[screenId][spaceId].cols[i][1]
-			local w = getWindow(preWinId)
-			if w then
-				preWidth = preWidth + w:frame().w + WM.tileGap
-			end
-		end
-
-		-- Center the target window on screen
-		local targetX = (screenFrame.w - win:frame().w) / 2
-		local newStartX = targetX - preWidth
-		state.startXForScreenAndSpace[screenId][spaceId] = newStartX
-
-		-- Switch spaces with zero animation to avoid windows flying across screen
-		state.activeSpaceForScreen[screenId] = spaceId
-		moveSpaceWindowsOffscreen(screenId, currentSpaceId)
-		retile(screenId, spaceId, { duration = 0 })
-
-		-- Update menubar to reflect space change
-		updateMenubar()
-	end
-
-	windowWatcherPaused = true
-	focusWindow(win, function()
-		-- Only bringIntoView if we're not switching spaces (already positioned correctly)
-		if not switchingSpaces then
-			bringIntoView(win)
-		end
-		centerMouseInWindow(win)
-		hs.timer.doAfter(0.1, function()
-			windowWatcherPaused = false
-		end)
-	end)
+	return WM.Actions.navigateStack(direction)
 end
 
 function WM:focusDirection(direction)
-	windowWatcherPaused = true
-	local focusedWindow = Window.focusedWindow()
-	if not focusedWindow then
-		return
-	end
-	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(focusedWindow:id())
-
-	if not currentColIdx then
-		return
-	end
-	if direction == "left" then
-		currentColIdx = currentColIdx - 1
-		if currentColIdx < 1 then
-			return
-		end
-		currentRowIdx = earliestIndexInList(
-			state.screens[currentScreenId][currentSpace].cols[currentColIdx],
-			state.windowStack
-		) or 1
-	end
-	if direction == "right" then
-		currentColIdx = currentColIdx + 1
-		if currentColIdx > #state.screens[currentScreenId][currentSpace].cols then
-			return
-		end
-		currentRowIdx = earliestIndexInList(
-			state.screens[currentScreenId][currentSpace].cols[currentColIdx],
-			state.windowStack
-		) or 1
-	end
-
-	if direction == "down" then
-		currentRowIdx = currentRowIdx + 1
-	end
-	if direction == "up" then
-		currentRowIdx = currentRowIdx - 1
-	end
-	if currentRowIdx < 1 then
-		return
-	end
-	if currentRowIdx > #state.screens[currentScreenId][currentSpace].cols[currentColIdx] then
-		return
-	end
-
-	local nextWindow = getWindow(state.screens[currentScreenId][currentSpace].cols[currentColIdx][currentRowIdx])
-	if nextWindow then
-		focusWindow(nextWindow, function()
-			addToWindowStack(nextWindow)
-			bringIntoView(nextWindow)
-			centerMouseInWindow(nextWindow)
-			hs.timer.doAfter(0.1, function()
-				windowWatcherPaused = false
-			end)
-		end)
-	end
+	return WM.Actions.focusDirection(direction)
 end
 
 function WM:moveDirection(direction)
-	local focusedWindow = Window.focusedWindow()
-	if not focusedWindow then
-		return
-	end
-	local currentScreenId, currentSpace, currentColIdx, _ = locateWindow(focusedWindow:id())
-	local nextColIdx = nil
-
-	if not currentColIdx then
-		return
-	end
-	if direction == "left" then
-		nextColIdx = currentColIdx - 1
-	end
-	if direction == "right" then
-		nextColIdx = currentColIdx + 1
-	end
-	if not nextColIdx then
-		return
-	end
-	if nextColIdx < 1 then
-		return
-	end
-	if nextColIdx > #state.screens[currentScreenId][currentSpace].cols then
-		return
-	end
-
-	state.screens[currentScreenId][currentSpace].cols[currentColIdx], state.screens[currentScreenId][currentSpace].cols[nextColIdx] =
-		state.screens[currentScreenId][currentSpace].cols[nextColIdx],
-		state.screens[currentScreenId][currentSpace].cols[currentColIdx]
-
-	local nextWindow = getWindow(state.screens[currentScreenId][currentSpace].cols[nextColIdx][1])
-	if nextWindow then
-		bringIntoView(nextWindow)
-		centerMouseInWindow(nextWindow)
-	end
+	return WM.Actions.moveDirection(direction)
 end
 
 function WM:nextScreen()
-	local currentScreen = Mouse.getCurrentScreen()
-	local currentScreenId = currentScreen:id()
-	local currentSpace = state.activeSpaceForScreen[currentScreenId]
-	local nextScreen = currentScreen:next()
-	local nextScreenId = nextScreen:id()
-	local nextSpace = state.activeSpaceForScreen[nextScreenId]
-
-	-- Focus the first window in the next screen's first column
-	local candidateWindowIds = flatten(state.screens[nextScreenId][nextSpace].cols)
-	local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
-	local nextWindowId = candidateWindowIds[nextWindowIdx]
-	if nextWindowId then
-		local nextWindow = getWindow(nextWindowId)
-		nextWindow:focus()
-		centerMouseInWindow(nextWindow)
-	else
-		-- Center the mouse in the next screen
-		local screenFrame = Screen(nextScreenId):frame()
-		local centerX = screenFrame.x + screenFrame.w / 2
-		local centerY = screenFrame.y + screenFrame.h / 2
-		Mouse.absolutePosition({ x = centerX, y = centerY })
-	end
+	return WM.Actions.nextScreen()
 end
 
 function WM:moveWindowToNextScreen()
-	local currentWindow = Window.focusedWindow()
-	if not currentWindow then
-		return
-	end
-	local currentWindowId = currentWindow:id()
-	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(currentWindowId)
-	local nextScreenId = currentWindow:screen():next():id()
-	local nextSpace = state.activeSpaceForScreen[nextScreenId]
-
-	table.insert(state.screens[nextScreenId][nextSpace].cols, { currentWindowId })
-	table.remove(state.screens[currentScreenId][currentSpace].cols[currentColIdx], currentRowIdx)
-	if #state.screens[currentScreenId][currentSpace].cols[currentColIdx] == 0 then
-		table.remove(state.screens[currentScreenId][currentSpace].cols, currentColIdx)
-	end
-
-	retile(currentScreenId, currentSpace)
-	retile(nextScreenId, nextSpace)
+	return WM.Actions.moveWindowToNextScreen()
 end
 
--- Toggle fullscreen horizontally for the focused window.
 function WM:toggleFullscreen()
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-
-	state.fullscreenOriginalWidth = state.fullscreenOriginalWidth or {}
-
-	local winId = win:id()
-	local frame = win:frame()
-	local screenFrame = win:screen():frame()
-
-	if state.fullscreenOriginalWidth[winId] then
-		-- Restore original width
-		frame.w = state.fullscreenOriginalWidth[winId]
-		frame.x = screenFrame.x
-		state.fullscreenOriginalWidth[winId] = nil
-	else
-		-- Save current width and expand
-		state.fullscreenOriginalWidth[winId] = frame.w
-		frame.x = screenFrame.x
-		frame.w = screenFrame.w
-	end
-
-	win:setFrame(frame, 0)
-	bringIntoView(win)
+	return WM.Actions.toggleFullscreen()
 end
 
 function WM:centerWindow()
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-	local screenId, spaceId, colIdx, _ = locateWindow(win:id())
-	if not screenId or not spaceId or not colIdx then
-		return
-	end
-
-	local screen = Screen(screenId)
-	if not screen then
-		return
-	end
-	local screenFrame = screen:frame()
-
-	local preWidth = 0
-	for i = 1, colIdx - 1 do
-		local w = getWindow(state.screens[screenId][spaceId].cols[i][1])
-		if w then
-			preWidth = preWidth + w:frame().w + WM.tileGap
-		end
-	end
-
-	local targetX = (screenFrame.w - win:frame().w) / 2
-	local startX = targetX - preWidth
-	state.startXForScreenAndSpace[screenId][spaceId] = startX
-	retile(screenId, spaceId)
+	return WM.Actions.centerWindow()
 end
 
 function WM:resizeFocusedWindowHorizontally(delta)
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	local col = state.screens[screenId][spaceId].cols[colIdx]
-	local screenFrame = win:screen():frame()
-
-	for _, winId in ipairs(col) do
-		local w = getWindow(winId)
-		if w then
-			local f = w:frame()
-			local screenRight = screenFrame.x + screenFrame.w
-			local winRight = f.x + f.w
-			local newWidth = math.max(100, f.w + delta)
-			if winRight >= screenRight - 1 and delta > 0 then
-				f.x = f.x - delta
-			end
-			f.w = newWidth
-			w:_setFrame(f)
-		end
-	end
-
-	-- retile(screenId, spaceId)
-	bringIntoView(win)
+	return WM.Actions.resizeFocusedWindowHorizontally(delta)
 end
 
 function WM:resizeFocusedWindowVertically(delta)
-	local win = Window.focusedWindow()
-	if not win or delta == 0 then
-		return
-	end
-
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	if not (screenId and spaceId and colIdx and rowIdx) then
-		return
-	end
-
-	local col = state.screens[screenId][spaceId].cols[colIdx]
-	if not col or #col < 2 then
-		return
-	end
-
-	local n = #col
-	local screenFrame = Screen(screenId):frame()
-	local minHeight = 50
-	local totalColHeight = screenFrame.h - WM.tileGap * (n - 1)
-
-	-- Gather current heights
-	local heights, othersTotal = {}, 0
-	for i, winId in ipairs(col) do
-		local h = getWindow(winId):frame().h
-		heights[i] = h
-		if i ~= rowIdx then
-			othersTotal = othersTotal + h
-		end
-	end
-
-	-- Clamp new height for the focused window
-	local focusCurrent = heights[rowIdx]
-	local focusNew = math.max(minHeight, math.min(focusCurrent + delta, totalColHeight - minHeight * (n - 1)))
-	if focusNew == focusCurrent then
-		return
-	end
-
-	-- Target total height for remaining windows
-	local targetOthersTotal = totalColHeight - focusNew
-	local scale = targetOthersTotal / othersTotal
-
-	-- Compute new heights
-	local newHeights, allocated = {}, 0
-	for i, h in ipairs(heights) do
-		if i == rowIdx then
-			newHeights[i] = focusNew
-		else
-			local nh = math.max(minHeight, math.floor(h * scale))
-			newHeights[i] = nh
-			allocated = allocated + nh
-		end
-	end
-
-	-- Distribute any leftover pixels (from rounding) to non-focused windows
-	local leftover = targetOthersTotal - allocated
-	if leftover ~= 0 then
-		local direction = leftover > 0 and 1 or -1
-		leftover = math.abs(leftover)
-		for i = 1, n do
-			if i ~= rowIdx then
-				newHeights[i] = newHeights[i] + direction
-				leftover = leftover - 1
-				if leftover == 0 then
-					break
-				end
-			end
-		end
-	end
-
-	-- Apply new frames
-	local y = screenFrame.y
-	for i, winId in ipairs(col) do
-		local w = getWindow(winId)
-		local f = w:frame()
-		f.y = y
-		f.h = newHeights[i]
-		w:setFrame(f)
-		y = y + f.h + WM.tileGap
-	end
+	return WM.Actions.resizeFocusedWindowVertically(delta)
 end
 
 function WM:switchToSpace(spaceId)
-	windowWatcherPaused = true
-
-	local currentScreen = Mouse.getCurrentScreen()
-	local screenId = currentScreen:id()
-
-	local currentSpace = state.activeSpaceForScreen[screenId]
-	if currentSpace == spaceId then
-		return
-	end
-
-	state.activeSpaceForScreen[screenId] = spaceId
-
-	-- 4-phase optimized approach: show new content first, cleanup in background
-	-- Since setFrame() doesn't change z-order, we can show new windows behind,
-	-- raise them to top, then clean up old windows (user doesn't see this)
-
-	-- Phase 1: Move ALL new space windows to their correct positions (not just visible)
-	-- This ensures correctness - all windows are positioned before we raise any
-	retile(screenId, spaceId, { duration = 0 })
-
-	-- Phase 2: Raise visible windows to top (now they cover old windows)
-	-- Use ONLY win:raise(), not app:activate(), to avoid raising ALL windows of that app
-	local screenFrame = Screen(screenId):frame()
-	local screenLeft = screenFrame.x
-	local screenRight = screenFrame.x + screenFrame.w
-
-	for _, col in ipairs(state.screens[screenId][spaceId].cols) do
-		for _, winId in ipairs(col) do
-			local win = getWindow(winId)
-			if win then
-				local f = win:frame()
-				-- Only raise if >75% visible
-				local winLeft = f.x
-				local winRight = f.x + f.w
-				local visibleLeft = math.max(winLeft, screenLeft)
-				local visibleRight = math.min(winRight, screenRight)
-				local visibleWidth = math.max(0, visibleRight - visibleLeft)
-				local percentVisible = visibleWidth / f.w
-
-				if percentVisible > 0.75 then
-					win:raise() -- Just raise, don't activate app (avoids raising ALL windows)
-				end
-			end
-		end
-	end
-
-	-- Phase 3: Clear old visible windows (user doesn't see this, already covered)
-	moveSpaceWindowsOffscreen(screenId, currentSpace, { onlyVisible = true })
-
-	-- Phase 4: Background cleanup - move ALL remaining old windows offscreen
-	-- This prevents ghost windows from being raised later by focusWindow/app:activate
-	moveSpaceWindowsOffscreen(screenId, currentSpace) -- No flags = move ALL windows
-
-	-- Update menubar to reflect space change
-	updateMenubar()
-
-	-- Check if there are urgent windows in this space
-	local urgentWindowIds = getUrgentWindowsInSpace(screenId, spaceId)
-	local candidateWindowIds = flatten(state.screens[screenId][spaceId].cols)
-	local nextWindowId
-
-	if #urgentWindowIds > 0 then
-		-- Focus the first urgent window (by earliest in window stack)
-		local urgentWindowIdx = earliestIndexInList(urgentWindowIds, state.windowStack)
-		nextWindowId = urgentWindowIds[urgentWindowIdx] or urgentWindowIds[1]
-	else
-		-- No urgent windows, use normal logic (earliest from window stack)
-		local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
-		nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
-	end
-
-	if nextWindowId then
-		local nextWindow = getWindow(nextWindowId)
-		-- Bring window into view BEFORE focusing, so macOS can actually focus it
-		bringIntoView(nextWindow)
-
-		focusWindow(nextWindow, function()
-			addToWindowStack(nextWindow)
-			centerMouseInWindow(nextWindow)
-			hs.timer.doAfter(0.1, function()
-				windowWatcherPaused = false
-			end)
-		end)
-	else
-		-- When switching to an empty space, delay re-enabling the watcher
-		-- to prevent macOS from auto-focusing a window on another space and
-		-- triggering an unwanted space switch back
-		hs.timer.doAfter(0.2, function()
-			windowWatcherPaused = false
-		end)
-	end
+	return WM.Actions.switchToSpace(spaceId)
 end
 
 function WM:slurp()
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	if not screenId or not spaceId or not colIdx or not rowIdx then
-		return
-	end
-	local cols = state.screens[screenId][spaceId].cols
-	if colIdx >= #cols then
-		return
-	end -- No column to the right
-	local rightCol = cols[colIdx + 1]
-	if not rightCol or #rightCol == 0 then
-		return
-	end
-
-	for i = 1, #rightCol do
-		table.insert(cols[colIdx], rowIdx + i, rightCol[i])
-	end
-
-	-- Remove the right column
-	table.remove(cols, colIdx + 1)
-
-	-- Make all windows in the slurped column have the same height
-	-- We'll set their heights to be equal, dividing the column height equally
-	local screenFrame = Screen(screenId):frame()
-	local col = cols[colIdx]
-	local n = #col
-	if n > 0 then
-		local colHeight = screenFrame.h - WM.tileGap * (n - 1)
-		local winHeight = math.floor(colHeight / n)
-		local y = screenFrame.y
-		for i = 1, n do
-			local w = getWindow(col[i])
-			if w then
-				local f = w:frame()
-				f.y = y
-				f.h = winHeight
-				w:setFrame(f)
-				y = y + winHeight + WM.tileGap
-			end
-		end
-	end
-
-	retile(screenId, spaceId)
+	return WM.Actions.slurp()
 end
 
 function WM:barf()
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	if not screenId or not spaceId or not colIdx or not rowIdx then
-		return
-	end
-	local cols = state.screens[screenId][spaceId].cols
-	if #cols == 0 then
-		return
-	end
-	if colIdx == #cols then
-		cols[colIdx + 1] = {}
-	end
-	if #cols[colIdx] == 0 then
-		return
-	end
-	if #cols[colIdx] == 1 then
-		return
-	end
-	local removedWin = table.remove(cols[colIdx], #cols[colIdx])
-	if not removedWin then
-		return
-	end
-	table.insert(cols, colIdx + 1, { removedWin })
-
-	-- Make all windows in the affected columns have the same height
-	local screenFrame = Screen(screenId):frame()
-	for i = colIdx, colIdx + 1 do
-		local col = cols[i]
-		if col then
-			local n = #col
-			if n > 0 then
-				local colHeight = screenFrame.h - WM.tileGap * (n - 1)
-				local winHeight = math.floor(colHeight / n)
-				local y = screenFrame.y
-				for j = 1, n do
-					local w = getWindow(col[j])
-					if w then
-						local f = w:frame()
-						f.y = y
-						f.h = winHeight
-						w:setFrame(f)
-						y = y + winHeight + WM.tileGap
-					end
-				end
-			end
-		end
-	end
-
-	retile(screenId, spaceId)
+	return WM.Actions.barf()
 end
 
 function WM:moveFocusedWindowToSpace(spaceId)
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-
-	local screenId, currentSpace, colIdx, rowIdx = locateWindow(win:id())
-	if not screenId or not currentSpace or not colIdx or not rowIdx then
-		return
-	end
-	if currentSpace == spaceId then
-		self:switchToSpace(spaceId)
-		return
-	end
-
-	windowWatcherPaused = true
-
-	local removedWin = table.remove(state.screens[screenId][currentSpace].cols[colIdx], rowIdx)
-	if #state.screens[screenId][currentSpace].cols[colIdx] == 0 then
-		table.remove(state.screens[screenId][currentSpace].cols, colIdx)
-	end
-
-	table.insert(state.screens[screenId][spaceId].cols, { removedWin })
-	retile(state, screenId, currentSpace)
-	self:switchToSpace(spaceId)
-
-	windowWatcherPaused = false
+	return WM.Actions.moveFocusedWindowToSpace(spaceId)
 end
 
 function WM:closeFocusedWindow()
-	local win = Window.focusedWindow()
-	if not win then
-		return
-	end
-	local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-	win:close()
-	if not screenId or not spaceId or not colIdx or not rowIdx then
-		return
-	end
-	if colIdx > 1 then
-		colIdx = colIdx - 1
-	end
-	local nextWindowId = state.screens[screenId][spaceId].cols[colIdx][1]
-	local nextWindow = getWindow(nextWindowId)
-	focusWindow(nextWindow, function()
-		addToWindowStack(nextWindow)
-		bringIntoView(nextWindow)
-		centerMouseInWindow(nextWindow)
-	end)
+	return WM.Actions.closeFocusedWindow()
 end
 
 function WM:createSpace(spaceId, screenId)
-	-- Default to current screen if not specified
-	screenId = screenId or Mouse.getCurrentScreen():id()
-
-	-- Initialize screen if needed
-	state.screens[screenId] = state.screens[screenId] or {}
-	state.startXForScreenAndSpace[screenId] = state.startXForScreenAndSpace[screenId] or {}
-
-	-- Initialize space if it doesn't exist
-	if not state.screens[screenId][spaceId] then
-		state.screens[screenId][spaceId] = { cols = {}, floating = {} }
-		state.startXForScreenAndSpace[screenId][spaceId] = 0
-		print("[createSpace]", "Created space:", spaceId, "on screen:", screenId)
-	end
-
-	return spaceId
+	return WM.Actions.createSpace(spaceId, screenId)
 end
 
 function WM:renameSpace(screenId, oldSpaceId, newSpaceId)
-	-- Validate inputs
-	if not screenId or not oldSpaceId or not newSpaceId then
-		print("[renameSpace] Error: missing required parameters")
-		return
-	end
-
-	-- Check if old space exists
-	if not state.screens[screenId] or not state.screens[screenId][oldSpaceId] then
-		print("[renameSpace] Error: space", oldSpaceId, "does not exist on screen", screenId)
-		return
-	end
-
-	-- Check if new space name already exists
-	if state.screens[screenId][newSpaceId] then
-		print("[renameSpace] Error: space", newSpaceId, "already exists on screen", screenId)
-		return
-	end
-
-	-- Don't allow renaming numbered spaces (1-4)
-	if type(oldSpaceId) == "number" and oldSpaceId >= 1 and oldSpaceId <= 9 then
-		print("[renameSpace] Error: cannot rename numbered space", oldSpaceId)
-		return
-	end
-
-	print("[renameSpace]", "Renaming space:", oldSpaceId, "->", newSpaceId, "on screen:", screenId)
-
-	-- Move space data to new key
-	state.screens[screenId][newSpaceId] = state.screens[screenId][oldSpaceId]
-	state.screens[screenId][oldSpaceId] = nil
-
-	-- Move startX data
-	if state.startXForScreenAndSpace[screenId] then
-		state.startXForScreenAndSpace[screenId][newSpaceId] = state.startXForScreenAndSpace[screenId][oldSpaceId] or 0
-		state.startXForScreenAndSpace[screenId][oldSpaceId] = nil
-	end
-
-	-- Update activeSpaceForScreen if this was the active space
-	if state.activeSpaceForScreen[screenId] == oldSpaceId then
-		state.activeSpaceForScreen[screenId] = newSpaceId
-	end
-
-	-- Update menubar to reflect the rename
-	updateMenubar()
-
-	-- Save state
-	self:saveState()
-
-	print("[renameSpace]", "Successfully renamed space to:", newSpaceId)
+	return WM.Actions.renameSpace(screenId, oldSpaceId, newSpaceId)
 end
 
 ------------------------------------------
@@ -1056,174 +287,11 @@ function WM:clearAllUrgent()
 end
 
 function WM:scroll(direction, opts)
-	local ignoreApps = opts.ignoreApps or {}
-	local win = Window.focusedWindow()
-	local appName = win and win:application():name() or ""
-	local ignore = false
-	for _, n in ipairs(ignoreApps) do
-		if appName == n then
-			ignore = true
-			break
-		end
-	end
-
-	if not ignore then
-		centerMouseInWindow(win)
-		local delta = (direction == "up" and WM.scrollSpeed) or -WM.scrollSpeed
-		hs.eventtap.event.newScrollEvent({ 0, delta }, {}, "pixel"):post()
-	else
-		local key = (direction == "up" and "u") or "d"
-		hs.eventtap.keyStroke({ "ctrl" }, key, 0, win:application())
-	end
+	return WM.Actions.scroll(direction, opts)
 end
 
 function WM:launchOrFocusApp(appName, launchCommand, opts)
-	local singleton = opts and opts.singleton or false
-	local launchViaMenu = opts and opts.launchViaMenu or false
-	local focusIfExists = opts and opts.focusIfExists or false
-
-	local app = Application.get(appName)
-	if app and focusIfExists then
-		local appWindowsById = {}
-		for _, win in ipairs(app:allWindows()) do
-			appWindowsById[win:id()] = win
-		end
-
-		local candidateWindowIds = {}
-		if singleton then
-			for screenId, spaces in pairs(state.screens) do
-				for spaceId, space in pairs(spaces) do
-					for colIdx, col in ipairs(space.cols) do
-						for rowIdx, winId in ipairs(col) do
-							if appWindowsById[winId] then
-								table.insert(candidateWindowIds, winId)
-							end
-						end
-					end
-				end
-			end
-		else
-			for screenId, spaces in pairs(state.screens) do
-				for spaceId, space in pairs(spaces) do
-					if spaceId == state.activeSpaceForScreen[screenId] then
-						for colIdx, col in ipairs(space.cols) do
-							for rowIdx, winId in ipairs(col) do
-								if appWindowsById[winId] then
-									table.insert(candidateWindowIds, winId)
-								end
-							end
-						end
-					end
-				end
-			end
-		end
-
-		local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
-		local nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
-		if nextWindowId then
-			windowWatcherPaused = true
-			local screenId, spaceId, _, _ = locateWindow(nextWindowId)
-			if not screenId or not spaceId then
-				return
-			end
-			local currentSpaceId = state.activeSpaceForScreen[screenId]
-			if spaceId ~= currentSpaceId then
-				state.activeSpaceForScreen[screenId] = spaceId
-				-- Only retile the affected screen's spaces
-				moveSpaceWindowsOffscreen(screenId, currentSpaceId)
-				retile(screenId, spaceId)
-
-				-- Update menubar to reflect space change
-				updateMenubar()
-			end
-			local nextWindow = getWindow(nextWindowId)
-			focusWindow(nextWindow, function()
-				addToWindowStack(nextWindow)
-				bringIntoView(nextWindow)
-				centerMouseInWindow(nextWindow)
-				hs.timer.doAfter(0.1, function()
-					windowWatcherPaused = false
-				end)
-			end)
-			return
-		end
-	end
-
-	local targetScreen = Mouse.getCurrentScreen()
-	local targetScreenId = targetScreen:id()
-	local targetSpaceId = state.activeSpaceForScreen[targetScreenId]
-
-	local candidateWindowIds = flatten(state.screens[targetScreenId][targetSpaceId].cols)
-	local earliestWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
-	if earliestWindowIdx == nil then
-		earliestWindowIdx = 1
-	end
-	local targetColIdx
-	if #candidateWindowIds > 0 then
-		_, _, targetColIdx, _ = locateWindow(candidateWindowIds[earliestWindowIdx])
-		if targetColIdx ~= nil then
-			targetColIdx = targetColIdx + 1
-		end
-		if targetColIdx == nil then
-			targetColIdx = 1
-		end
-	else
-		targetColIdx = 1
-	end
-
-	local windowsBefore = {}
-	for _, win in ipairs(Window.allWindows()) do
-		windowsBefore[win:id()] = win
-	end
-
-	local function waitForNewWindow(attempts, callback)
-		if attempts <= 0 then
-			return
-		end
-		local windowsAfter = {}
-		for _, win in ipairs(Window.allWindows()) do
-			windowsAfter[win:id()] = win
-		end
-		for winId, win in pairs(windowsAfter) do
-			if not windowsBefore[winId] then
-				callback(win)
-				return
-			end
-		end
-		hs.timer.doAfter(0.025, function()
-			waitForNewWindow(attempts - 1, callback)
-		end)
-	end
-
-	local function waitAndHandleNewWindow()
-		waitForNewWindow(10, function(newWindow)
-			table.insert(state.screens[targetScreenId][targetSpaceId].cols, targetColIdx, { newWindow:id() })
-			retile(targetScreenId, targetSpaceId)
-			focusWindow(newWindow, function()
-				addToWindowStack(newWindow)
-				centerMouseInWindow(newWindow)
-				hs.timer.doAfter(0.1, function()
-					windowWatcherPaused = false
-				end)
-			end)
-		end)
-	end
-
-	windowWatcherPaused = true
-
-	if launchViaMenu then
-		if app and app:isRunning() then
-			app:activate()
-			local didLaunch = app:selectMenuItem({ "File", "New Window" })
-			if didLaunch then
-				waitAndHandleNewWindow()
-				return
-			end
-		end
-	end
-
-	hs.execute(launchCommand, false)
-	waitAndHandleNewWindow()
+	return WM.Actions.launchOrFocusApp(appName, launchCommand, opts)
 end
 
 function WM:saveState()
@@ -1260,10 +328,16 @@ function WM:init()
 	-- 6a. Now that Urgency is initialized, update menubar for the first time
 	updateMenubar()
 
-	-- 7. Clean window stack
+	-- 7. Initialize Events module
+	WM.Events.init(WM)
+
+	-- 8. Initialize Actions module
+	WM.Actions.init(WM)
+
+	-- 9. Clean window stack
 	cleanWindowStack()
 
-	-- 8. Retile all spaces
+	-- 10. Retile all spaces
 	print("[init] Retiling all spaces")
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
@@ -1275,10 +349,10 @@ function WM:init()
 		end
 	end
 
-	-- 9. Set UI callbacks for Windows module
+	-- 11. Set UI callbacks for Windows module
 	WM.Windows.setUICallbacks(updateMenubar, updateCommandPalette)
 
-	-- 10. Add focused window to stack
+	-- 12. Add focused window to stack
 	addToWindowStack(Window.focusedWindow())
 
 	print("[init] Initialization complete")
