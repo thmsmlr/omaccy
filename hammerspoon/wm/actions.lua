@@ -635,6 +635,8 @@ function Actions.resizeFocusedWindowHorizontally(delta)
 		end
 	end
 
+	-- Retile to reflow other columns based on new width
+	retile(screenId, spaceId)
 	bringIntoView(win)
 end
 
