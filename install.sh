@@ -34,20 +34,41 @@ fi
 # Create the directory if it doesn't exist
 mkdir -p "$CONFIG_DEST"
 
-# Link individual configuration files
+# Link all configuration files and directories recursively
 echo "Linking Hammerspoon configuration files into $CONFIG_DEST"
-for FILE in init.lua serpent.lua wm.lua; do
-  SRC="$CONFIG_SRC/$FILE"
-  DEST="$CONFIG_DEST/$FILE"
 
-  if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then
-    BACKUP="$DEST.backup.$(date +%s)"
-    echo "Existing file $DEST detected. Backing up to $BACKUP"
-    mv "$DEST" "$BACKUP"
-  fi
+# Function to link files and directories
+link_hammerspoon_files() {
+  local SRC_DIR="$1"
+  local DEST_DIR="$2"
 
-  ln -sfn "$SRC" "$DEST"
-done
+  # Link all files in the current directory
+  for ITEM in "$SRC_DIR"/*; do
+    if [ -e "$ITEM" ]; then
+      ITEM_NAME=$(basename "$ITEM")
+      SRC="$ITEM"
+      DEST="$DEST_DIR/$ITEM_NAME"
+
+      if [ -d "$ITEM" ]; then
+        # If it's a directory, create it in destination and recurse
+        mkdir -p "$DEST"
+        link_hammerspoon_files "$SRC" "$DEST"
+      else
+        # If it's a file, link it
+        if [ -e "$DEST" ] && [ ! -L "$DEST" ]; then
+          BACKUP="$DEST.backup.$(date +%s)"
+          echo "Existing file $DEST detected. Backing up to $BACKUP"
+          mv "$DEST" "$BACKUP"
+        fi
+
+        ln -sfn "$SRC" "$DEST"
+        echo "  • Linked $ITEM_NAME"
+      fi
+    fi
+  done
+}
+
+link_hammerspoon_files "$CONFIG_SRC" "$CONFIG_DEST"
 
 # Install Chrome scripts (Chrome extension)
 CHROME_SRC="$SCRIPT_DIR/chrome-scripts"
