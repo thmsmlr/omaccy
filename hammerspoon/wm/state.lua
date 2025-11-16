@@ -77,23 +77,20 @@ local state = {
 -- Private helpers
 ------------------------------------------
 
--- Get all currently open standard windows
-local function getCurrentWindows()
+-- Get all currently open standard windows and build lookup table
+-- Returns: windows list, validWindowIds set
+local function getCurrentWindowsWithLookup()
 	local windows = {}
+	local validIds = {}
 	for _, app in ipairs(Application.runningApplications()) do
 		for _, win in ipairs(app:allWindows()) do
 			if win:isStandard() and win:isVisible() and not win:isFullScreen() then
 				table.insert(windows, win)
+				validIds[win:id()] = true
 			end
 		end
 	end
-	return windows
-end
-
--- Validate that a window ID still exists and is usable
-local function isValidWindow(winId)
-	local win = Window(winId)
-	return win and win:isStandard() and win:isVisible()
+	return windows, validIds
 end
 
 ------------------------------------------
@@ -133,7 +130,8 @@ function State.load()
 end
 
 -- Clean invalid window IDs from saved state structure
-function State.cleanSavedStateWindows(savedState)
+-- validIds: set of currently valid window IDs
+function State.cleanSavedStateWindows(savedState, validIds)
 	local deadWindows = {}
 	for screenId, spaces in pairs(savedState.screens or {}) do
 		for spaceId, space in pairs(spaces) do
@@ -142,7 +140,7 @@ function State.cleanSavedStateWindows(savedState)
 				for colIdx = #space.cols, 1, -1 do
 					local col = space.cols[colIdx]
 					for rowIdx = #col, 1, -1 do
-						if not isValidWindow(col[rowIdx]) then
+						if not validIds[col[rowIdx]] then
 							table.insert(deadWindows, {
 								winId = col[rowIdx],
 								spaceId = spaceId,
@@ -270,7 +268,8 @@ function State.initializeScreenStructures(savedState)
 end
 
 -- Reconcile current windows with saved placements
-function State.reconcileWindows(savedState)
+-- currentWindows: list of current window objects (pre-fetched)
+function State.reconcileWindows(savedState, currentWindows)
 	-- Build placement map from saved state
 	local savedPlacements = {}
 	for screenId, spaces in pairs(savedState.screens or {}) do
@@ -291,7 +290,6 @@ function State.reconcileWindows(savedState)
 	end
 
 	-- Process all current windows
-	local currentWindows = getCurrentWindows()
 	local placedWindows = {}
 
 	-- First pass: place windows that have valid saved positions
@@ -348,14 +346,25 @@ end
 
 -- Initialize the state module (called during WM init)
 function State.init(wm)
+	local initStart = hs.timer.secondsSinceEpoch()
+	local stepStart = initStart
+	local function profile(label)
+		local now = hs.timer.secondsSinceEpoch()
+		local elapsed = (now - stepStart) * 1000
+		print(string.format("[State profile] %s: %.2fms", label, elapsed))
+		stepStart = now
+	end
+
 	State.wm = wm
 	print("[State] State module initialized")
 
 	-- 0. Reset state to initial values (important for reinit)
 	State.reset()
+	profile("reset")
 
 	-- 1. Load saved state
 	local savedState = State.load()
+	profile("load")
 
 	-- 2. Restore non-window state
 	state.windowStack = savedState.windowStack or state.windowStack
@@ -364,18 +373,30 @@ function State.init(wm)
 	state.urgentWindows = savedState.urgentWindows or state.urgentWindows
 	state.activeSpaceForScreen = savedState.activeSpaceForScreen or state.activeSpaceForScreen
 	state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or state.startXForScreenAndSpace
+	profile("restore non-window state")
 
-	-- 3. Clean invalid window IDs from saved state
-	State.cleanSavedStateWindows(savedState)
+	-- 2a. Get all current windows once (expensive operation)
+	local currentWindows, validIds = getCurrentWindowsWithLookup()
+	profile("getCurrentWindowsWithLookup")
+
+	-- 3. Clean invalid window IDs from saved state (using pre-built lookup)
+	State.cleanSavedStateWindows(savedState, validIds)
+	profile("cleanSavedStateWindows")
 
 	-- 4. Handle disconnected monitors
 	State.migrateDisconnectedScreens(savedState)
+	profile("migrateDisconnectedScreens")
 
 	-- 5. Initialize screen structures
 	State.initializeScreenStructures(savedState)
+	profile("initializeScreenStructures")
 
-	-- 6. Reconcile current windows with saved state
-	State.reconcileWindows(savedState)
+	-- 6. Reconcile current windows with saved state (using pre-fetched windows)
+	State.reconcileWindows(savedState, currentWindows)
+	profile("reconcileWindows")
+
+	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
+	print(string.format("[State] Init complete - TOTAL: %.2fms", totalTime))
 
 	return savedState
 end

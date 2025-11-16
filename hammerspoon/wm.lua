@@ -305,6 +305,15 @@ function WM:showCommandPalette()
 end
 
 function WM:init()
+	local initStart = hs.timer.secondsSinceEpoch()
+	local stepStart = initStart
+	local function profile(label)
+		local now = hs.timer.secondsSinceEpoch()
+		local elapsed = (now - stepStart) * 1000
+		print(string.format("[profile] %s: %.2fms", label, elapsed))
+		stepStart = now
+	end
+
 	print("[init] Starting window manager initialization")
 
 	-- 0. Stop existing resources if reinitializing
@@ -314,39 +323,50 @@ function WM:init()
 	if WM.UI and WM.UI.stop then
 		WM.UI.stop()
 	end
+	profile("Stop existing resources")
 
 	-- 1. Initialize State module (handles loading, cleaning, migration, reconciliation)
 	WM.State.init(WM)
+	profile("State.init")
 
 	-- 2. Initialize Windows module
 	WM.Windows.init(WM)
+	profile("Windows.init")
 
 	-- 3. Initialize Tiling module
 	WM.Tiling.init(WM)
+	profile("Tiling.init")
 
 	-- 4. Initialize Spaces module
 	WM.Spaces.init(WM)
+	profile("Spaces.init")
 
 	-- 5. Initialize UI module (must come before Urgency since Urgency needs updateMenubar)
 	WM.UI.init(WM, state, WM.Spaces, WM.Urgency, WM.Windows)
+	profile("UI.init")
 
 	-- 6. Initialize Urgency module
 	WM.Urgency.init(WM, state, WM.Windows, updateMenubar, updateCommandPalette)
+	profile("Urgency.init")
 
 	-- 6a. Now that Urgency is initialized, update menubar for the first time
 	updateMenubar()
+	profile("updateMenubar")
 
 	-- 7. Initialize Events module
 	WM.Events.init(WM)
+	profile("Events.init")
 
 	-- 8. Initialize Actions module
 	WM.Actions.init(WM)
+	profile("Actions.init")
 
 	-- 9. Clean window stack
 	cleanWindowStack()
+	profile("cleanWindowStack")
 
 	-- 10. Retile all spaces
-	print("[init] Retiling all spaces")
+	local retileStart = hs.timer.secondsSinceEpoch()
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
 			if state.activeSpaceForScreen[screenId] == spaceId then
@@ -356,17 +376,21 @@ function WM:init()
 			end
 		end
 	end
+	profile("Retile all spaces")
 
 	-- 11. Set UI callbacks for Windows module
 	WM.Windows.setUICallbacks(updateMenubar, updateCommandPalette)
+	profile("setUICallbacks")
 
 	-- 12. Add focused window to stack
 	addToWindowStack(Window.focusedWindow())
+	profile("addToWindowStack")
 
 	-- 13. Expose command palette for hotkey access
 	WM.commandPalette = WM.UI.commandPalette
 
-	print("[init] Initialization complete")
+	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
+	print(string.format("[init] Initialization complete - TOTAL: %.2fms", totalTime))
 end
 
 hs.hotkey.bind({ "cmd", "ctrl" }, "t", function()

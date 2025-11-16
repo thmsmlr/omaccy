@@ -62,6 +62,15 @@ function Events.stop()
 end
 
 function Events.init(wm)
+	local initStart = hs.timer.secondsSinceEpoch()
+	local stepStart = initStart
+	local function profile(label)
+		local now = hs.timer.secondsSinceEpoch()
+		local elapsed = (now - stepStart) * 1000
+		print(string.format("[Events profile] %s: %.2fms", label, elapsed))
+		stepStart = now
+	end
+
 	WM = wm
 	state = WM.State.get()
 	Windows = WM.Windows
@@ -80,9 +89,11 @@ function Events.init(wm)
 	bringIntoView = Tiling.bringIntoView
 	clearWindowUrgent = Urgency.clearWindowUrgent
 	updateMenubar = UI.updateMenubar
+	profile("setup references")
 
 	-- Create window watcher
 	windowWatcher = hs.window.filter.new()
+	profile("window.filter.new()")
 
 	-- Window focused handler
 	windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appName, event)
@@ -114,6 +125,7 @@ function Events.init(wm)
 		end
 		bringIntoView(win)
 	end)
+	profile("subscribe windowFocused")
 
 	-- Window created handler
 	windowWatcher:subscribe(hs.window.filter.windowCreated, function(win, appName, event)
@@ -146,6 +158,7 @@ function Events.init(wm)
 		cleanWindowStack()
 		retileAll()
 	end)
+	profile("subscribe windowCreated")
 
 	-- Window destroyed handler
 	windowWatcher:subscribe(hs.window.filter.windowDestroyed, function(win, appName, event)
@@ -199,6 +212,7 @@ function Events.init(wm)
 		-- Retile all screens/spaces (could optimize to just affected ones)
 		retileAll()
 	end)
+	profile("subscribe windowDestroyed")
 
 	-- Fullscreen/unfullscreen handler
 	windowWatcher:subscribe(
@@ -210,8 +224,10 @@ function Events.init(wm)
 			retileAll()
 		end
 	)
+	profile("subscribe fullscreen")
 
-	print("[Events] Module initialized")
+	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
+	print(string.format("[Events] Module initialized - TOTAL: %.2fms", totalTime))
 end
 
 return Events

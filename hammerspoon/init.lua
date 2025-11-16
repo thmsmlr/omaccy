@@ -248,6 +248,7 @@ applicationHotkey(
 -- Reload --
 -- Reinitialize window manager (fast, no full Hammerspoon reload)
 hs.hotkey.bind({ "cmd", "ctrl" }, "r", function()
+	WM:saveState()
 	WM:init()
 end)
 
