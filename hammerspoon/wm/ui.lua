@@ -15,6 +15,7 @@ local Windows = nil
 
 -- UI state
 local commandPaletteMode = "root" -- "root", "moveWindowToSpace", "renameSpace"
+local modeStack = {} -- Stack of previous modes for escape-to-go-back
 local previousChoicesCount = 0
 
 ------------------------------------------
@@ -245,7 +246,17 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 	-- Create command palette (fuzzy finder for commands and spaces)
 	UI.commandPalette = hs.chooser.new(function(choice)
 		if not choice then
+			-- Escape pressed: go back if in submenu, close if at root
+			if #modeStack > 0 then
+				commandPaletteMode = table.remove(modeStack)
+				UI.commandPalette:query("")
+				UI.commandPalette:choices(buildCommandPaletteChoices())
+				UI.commandPalette:show()
+				return
+			end
+			-- At root, close normally
 			commandPaletteMode = "root"
+			modeStack = {}
 			UI.commandPalette:hide()
 			return
 		end
@@ -281,6 +292,7 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 		end
 
 		commandPaletteMode = "root"
+		modeStack = {}
 	end)
 
 	UI.commandPalette:invalidCallback(function(choice)
@@ -291,12 +303,14 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 		local actionType = choice.actionType
 		if actionType == "navigateToMoveWindow" then
 			print("[commandPalette] Navigating to moveWindowToSpace mode")
+			table.insert(modeStack, commandPaletteMode)
 			commandPaletteMode = "moveWindowToSpace"
 			UI.commandPalette:query("")
 			local choices = buildCommandPaletteChoices()
 			UI.commandPalette:choices(choices)
 		elseif actionType == "navigateToRenameSpace" then
 			print("[commandPalette] Navigating to renameSpace mode")
+			table.insert(modeStack, commandPaletteMode)
 			commandPaletteMode = "renameSpace"
 			UI.commandPalette:query("")
 			local choices = buildCommandPaletteChoices()
