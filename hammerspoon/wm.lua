@@ -44,6 +44,10 @@ WM.Actions = dofile(hs.configdir .. "/wm/actions.lua")
 -- Get state reference from State module
 local state = WM.State.get()
 
+-- Periodic state save timer
+local stateSaveTimer = nil
+local STATE_SAVE_INTERVAL = 10 -- seconds
+
 --[[
 
 This is a PaperWM style scrolling window manager.
@@ -317,6 +321,10 @@ function WM:init()
 	print("[init] Starting window manager initialization")
 
 	-- 0. Stop existing resources if reinitializing
+	if stateSaveTimer then
+		stateSaveTimer:stop()
+		stateSaveTimer = nil
+	end
 	if WM.Events and WM.Events.stop then
 		WM.Events.stop()
 	end
@@ -388,6 +396,11 @@ function WM:init()
 
 	-- 13. Expose command palette for hotkey access
 	WM.commandPalette = WM.UI.commandPalette
+
+	-- 14. Start periodic state save timer
+	stateSaveTimer = Timer.doEvery(STATE_SAVE_INTERVAL, function()
+		WM.State.save()
+	end)
 
 	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
 	print(string.format("[init] Initialization complete - TOTAL: %.2fms", totalTime))
