@@ -379,6 +379,14 @@ function State.init(wm)
 	local currentWindows, validIds = getCurrentWindowsWithLookup()
 	profile("getCurrentWindowsWithLookup")
 
+	-- 2b. Clean stale urgentWindows entries
+	for winId, _ in pairs(state.urgentWindows) do
+		if not validIds[winId] then
+			print("[State] Removing stale urgent window: " .. winId)
+			state.urgentWindows[winId] = nil
+		end
+	end
+
 	-- 3. Clean invalid window IDs from saved state (using pre-built lookup)
 	State.cleanSavedStateWindows(savedState, validIds)
 	profile("cleanSavedStateWindows")

@@ -168,6 +168,16 @@ function Events.init(wm)
 		print("[windowDestroyed]", win:title(), win:id())
 
 		local winId = win:id()
+
+		-- Clean up urgentWindows unconditionally (before early return)
+		if state.urgentWindows[winId] then
+			state.urgentWindows[winId] = nil
+			updateMenubar()
+		end
+
+		-- Clean up fullscreenOriginalWidth unconditionally (before early return)
+		state.fullscreenOriginalWidth[winId] = nil
+
 		local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
 		if not screenId or not spaceId or not colIdx or not rowIdx then
 			return
@@ -205,9 +215,6 @@ function Events.init(wm)
 
 		-- Clean up the window stack to remove any now-invalid windows
 		cleanWindowStack()
-
-		-- Remove from fullscreenOriginalWidth
-		state.fullscreenOriginalWidth[winId] = nil
 
 		-- Retile all screens/spaces (could optimize to just affected ones)
 		retileAll()
