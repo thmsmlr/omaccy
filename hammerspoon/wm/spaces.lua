@@ -101,9 +101,12 @@ end
 ------------------------------------------
 
 -- Helper: Build space list for switching or moving
-local function buildSpaceList(query, actionType)
+local function buildSpaceList(query, actionType, includeCreateOption)
 	local choices = {}
 	query = query or ""
+	if includeCreateOption == nil then
+		includeCreateOption = true
+	end
 
 	-- Get all screens sorted by x position (left to right)
 	local screens = Screen.allScreens()
@@ -114,7 +117,7 @@ local function buildSpaceList(query, actionType)
 	-- Check if query matches an existing space (that has windows)
 	-- This determines whether to show the "Create space" option
 	local queryMatchesExisting = false
-	if query ~= "" then
+	if query ~= "" and includeCreateOption then
 		local lowerQuery = string.lower(query)
 
 		-- Check if query is a numbered space (exact match for numbers)
@@ -160,7 +163,7 @@ local function buildSpaceList(query, actionType)
 	end
 
 	-- Add "Create space" option if query doesn't match and isn't empty
-	if query ~= "" and not queryMatchesExisting then
+	if query ~= "" and not queryMatchesExisting and includeCreateOption then
 		local currentScreen = Mouse.getCurrentScreen()
 		if actionType == "switchSpace" then
 			table.insert(choices, {
@@ -434,8 +437,8 @@ function Spaces.isSpaceUrgent(screenId, spaceId)
 	return isSpaceUrgent(screenId, spaceId)
 end
 
-function Spaces.buildSpaceList(query, actionType)
-	return buildSpaceList(query, actionType)
+function Spaces.buildSpaceList(query, actionType, includeCreateOption)
+	return buildSpaceList(query, actionType, includeCreateOption)
 end
 
 return Spaces

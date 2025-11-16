@@ -14,7 +14,7 @@ local Urgency = nil
 local Windows = nil
 
 -- UI state
-local commandPaletteMode = "root" -- "root", "moveWindowToSpace", "renameSpace"
+local commandPaletteMode = "root" -- "root", "moveWindowToSpace", "renameSpace", "createSpace"
 local modeStack = {} -- Stack of previous modes for escape-to-go-back
 local previousChoicesCount = 0
 
@@ -22,29 +22,125 @@ local previousChoicesCount = 0
 -- Private helpers
 ------------------------------------------
 
+-- Fuzzy matching function for commands
+local function fuzzyMatch(query, text)
+	if query == "" then
+		return 0
+	end
+
+	local lowerQuery = string.lower(query)
+	local lowerText = string.lower(text)
+	local queryLen = #lowerQuery
+	local textLen = #lowerText
+	local score = 0
+	local queryIdx = 1
+	local lastMatchIdx = 0
+	local consecutiveMatches = 0
+
+	for textIdx = 1, textLen do
+		if queryIdx > queryLen then
+			break
+		end
+
+		local queryChar = lowerQuery:sub(queryIdx, queryIdx)
+		local textChar = lowerText:sub(textIdx, textIdx)
+
+		if queryChar == textChar then
+			score = score + 100
+			if queryIdx == 1 and textIdx == 1 then
+				score = score + 200
+			end
+			if textIdx == lastMatchIdx + 1 then
+				consecutiveMatches = consecutiveMatches + 1
+				score = score + (50 * consecutiveMatches)
+			else
+				consecutiveMatches = 0
+			end
+			score = score + (100 - textIdx)
+			lastMatchIdx = textIdx
+			queryIdx = queryIdx + 1
+		end
+	end
+
+	if queryIdx > queryLen then
+		return score
+	else
+		return nil
+	end
+end
+
 -- Build command palette choices based on current mode
 local function buildCommandPaletteChoices(query)
 	query = query or ""
 
 	if commandPaletteMode == "root" then
-		-- Root menu: show spaces directly for switching, plus additional commands
-		local choices = Spaces.buildSpaceList(query, "switchSpace")
+		-- Root menu: show spaces and commands, all fuzzy searchable
+		-- Get spaces without the create-on-no-match fallback
+		local choices = Spaces.buildSpaceList(query, "switchSpace", false)
 
-		-- Add "Rename space" command
-		table.insert(choices, {
-			text = "Rename space",
-			subText = "Rename the current space",
-			actionType = "navigateToRenameSpace",
-			valid = false, -- Don't close chooser when selected
-		})
+		-- Define commands
+		local commands = {
+			{
+				text = "Move window to space",
+				subText = "Move focused window to another space",
+				actionType = "navigateToMoveWindow",
+				valid = false,
+			},
+			{
+				text = "Rename space",
+				subText = "Rename the current space",
+				actionType = "navigateToRenameSpace",
+				valid = false,
+			},
+			{
+				text = "Create space",
+				subText = "Create a new named space",
+				actionType = "navigateToCreateSpace",
+				valid = false,
+			},
+		}
 
-		-- Add "Move window to space" command
-		table.insert(choices, {
-			text = "Move window to space",
-			subText = "Move focused window to another space",
-			actionType = "navigateToMoveWindow",
-			valid = false, -- Don't close chooser when selected
-		})
+		-- Apply fuzzy filtering to commands
+		if query ~= "" then
+			for _, cmd in ipairs(commands) do
+				local textScore = fuzzyMatch(query, cmd.text)
+				local subTextScore = fuzzyMatch(query, cmd.subText)
+				local bestScore = nil
+				if textScore and subTextScore then
+					bestScore = math.max(textScore, subTextScore)
+				elseif textScore then
+					bestScore = textScore
+				elseif subTextScore then
+					bestScore = subTextScore
+				end
+				if bestScore then
+					cmd.score = bestScore
+					table.insert(choices, cmd)
+				end
+			end
+		else
+			-- No query: add all commands with zero score
+			for _, cmd in ipairs(commands) do
+				cmd.score = 0
+				table.insert(choices, cmd)
+			end
+		end
+
+		-- Sort all choices by score (spaces already have scores from buildSpaceList)
+		table.sort(choices, function(a, b)
+			local aScore = a.score or 0
+			local bScore = b.score or 0
+			if aScore ~= bScore then
+				return aScore > bScore
+			end
+			-- Commands come after spaces when scores are equal
+			local aIsCommand = a.actionType and a.actionType:find("^navigate") ~= nil
+			local bIsCommand = b.actionType and b.actionType:find("^navigate") ~= nil
+			if aIsCommand ~= bIsCommand then
+				return bIsCommand
+			end
+			return false
+		end)
 
 		return choices
 	elseif commandPaletteMode == "moveWindowToSpace" then
@@ -58,7 +154,6 @@ local function buildCommandPaletteChoices(query)
 
 		local choices = {}
 		if query ~= "" then
-			-- Show action to rename the space
 			table.insert(choices, {
 				text = "Rename '" .. tostring(currentSpaceId) .. "' to '" .. query .. "'",
 				subText = "Press enter to confirm",
@@ -68,10 +163,32 @@ local function buildCommandPaletteChoices(query)
 				screenId = currentScreenId,
 			})
 		else
-			-- Show instruction when no query
 			table.insert(choices, {
 				text = "Type new name for space '" .. tostring(currentSpaceId) .. "'",
 				subText = "Current space will be renamed",
+				actionType = "instruction",
+				valid = false,
+			})
+		end
+
+		return choices
+	elseif commandPaletteMode == "createSpace" then
+		local currentScreen = Mouse.getCurrentScreen()
+		local currentScreenId = currentScreen:id()
+
+		local choices = {}
+		if query ~= "" then
+			table.insert(choices, {
+				text = "Create space '" .. query .. "'",
+				subText = "Create new named space and switch to it",
+				actionType = "createAndSwitchSpace",
+				screenId = currentScreenId,
+				spaceId = query,
+			})
+		else
+			table.insert(choices, {
+				text = "Type name for new space",
+				subText = "New space will be created and activated",
 				actionType = "instruction",
 				valid = false,
 			})
@@ -312,6 +429,13 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 			print("[commandPalette] Navigating to renameSpace mode")
 			table.insert(modeStack, commandPaletteMode)
 			commandPaletteMode = "renameSpace"
+			UI.commandPalette:query("")
+			local choices = buildCommandPaletteChoices()
+			UI.commandPalette:choices(choices)
+		elseif actionType == "navigateToCreateSpace" then
+			print("[commandPalette] Navigating to createSpace mode")
+			table.insert(modeStack, commandPaletteMode)
+			commandPaletteMode = "createSpace"
 			UI.commandPalette:query("")
 			local choices = buildCommandPaletteChoices()
 			UI.commandPalette:choices(choices)
