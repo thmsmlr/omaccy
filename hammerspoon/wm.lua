@@ -307,6 +307,14 @@ end
 function WM:init()
 	print("[init] Starting window manager initialization")
 
+	-- 0. Stop existing resources if reinitializing
+	if WM.Events and WM.Events.stop then
+		WM.Events.stop()
+	end
+	if WM.UI and WM.UI.stop then
+		WM.UI.stop()
+	end
+
 	-- 1. Initialize State module (handles loading, cleaning, migration, reconciliation)
 	WM.State.init(WM)
 

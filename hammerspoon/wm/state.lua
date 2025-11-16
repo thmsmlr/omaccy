@@ -105,6 +105,18 @@ function State.get()
 	return state
 end
 
+-- Reset state to initial values (for reinit)
+function State.reset()
+	print("[State] Resetting state to initial values")
+	state.screens = {}
+	state.activeSpaceForScreen = {}
+	state.windowStack = {}
+	state.windowStackIndex = 1
+	state.startXForScreenAndSpace = {}
+	state.fullscreenOriginalWidth = {}
+	state.urgentWindows = {}
+end
+
 -- Save current state to persistent storage
 function State.save()
 	Settings.set("wm_two_state", serpent.dump(state))
@@ -323,9 +335,9 @@ function State.reconcileWindows(savedState)
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
 			if space.cols then
-				-- Remove empty columns
+				-- Remove empty columns (including nil entries in sparse arrays)
 				for colIdx = #space.cols, 1, -1 do
-					if #space.cols[colIdx] == 0 then
+					if not space.cols[colIdx] or #space.cols[colIdx] == 0 then
 						table.remove(space.cols, colIdx)
 					end
 				end
@@ -338,6 +350,9 @@ end
 function State.init(wm)
 	State.wm = wm
 	print("[State] State module initialized")
+
+	-- 0. Reset state to initial values (important for reinit)
+	State.reset()
 
 	-- 1. Load saved state
 	local savedState = State.load()

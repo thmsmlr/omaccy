@@ -209,12 +209,10 @@ local function retile(state, screenId, spaceId, opts)
 	-- Phase 2: Process visible windows first (user sees these immediately)
 	if not opts.onlyOffscreen then
 		for _, update in ipairs(visibleUpdates) do
-			if Windows.framesDiffer(update.currentFrame, update.targetFrame) then
-				if opts.duration then
-					update.win:setFrame(update.targetFrame, opts.duration)
-				else
-					update.win:setFrame(update.targetFrame)
-				end
+			if opts.duration then
+				update.win:setFrame(update.targetFrame, opts.duration)
+			else
+				update.win:setFrame(update.targetFrame)
 			end
 		end
 	end
@@ -222,12 +220,10 @@ local function retile(state, screenId, spaceId, opts)
 	-- Phase 3: Process offscreen windows (user doesn't see these)
 	if not opts.onlyVisible then
 		for _, update in ipairs(offscreenUpdates) do
-			if Windows.framesDiffer(update.currentFrame, update.targetFrame) then
-				if opts.duration then
-					update.win:setFrame(update.targetFrame, opts.duration)
-				else
-					update.win:setFrame(update.targetFrame)
-				end
+			if opts.duration then
+				update.win:setFrame(update.targetFrame, opts.duration)
+			else
+				update.win:setFrame(update.targetFrame)
 			end
 		end
 	end

@@ -579,6 +579,12 @@ function Actions.toggleFullscreen()
 
 	win:setFrame(frame, 0)
 	bringIntoView(win)
+
+	-- Retile the space so other windows fill in gaps
+	local screenId, spaceId = locateWindow(winId)
+	if screenId and spaceId then
+		retile(screenId, spaceId)
+	end
 end
 
 function Actions.centerWindow()

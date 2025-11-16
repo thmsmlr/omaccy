@@ -53,6 +53,14 @@ function Events.isPaused()
 	return windowWatcherPaused
 end
 
+function Events.stop()
+	if windowWatcher then
+		print("[Events] Stopping window watcher")
+		windowWatcher:unsubscribeAll()
+		windowWatcher = nil
+	end
+end
+
 function Events.init(wm)
 	WM = wm
 	state = WM.State.get()

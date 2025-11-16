@@ -112,10 +112,10 @@ function UI.updateMenubar()
 	for _, screen in ipairs(screens) do
 		local screenId = screen:id()
 		local spaceId = state.activeSpaceForScreen[screenId] or 1
-		-- For named spaces, show abbreviated name or first 3 chars
+		-- For named spaces, show full name
 		local displayText
 		if type(spaceId) == "string" then
-			displayText = string.sub(spaceId, 1, 3)
+			displayText = spaceId
 		else
 			displayText = tostring(spaceId)
 		end
@@ -213,6 +213,20 @@ end
 -- Get reference to updateCommandPalette for callbacks
 function UI.getUpdateCommandPalette()
 	return updateCommandPalette
+end
+
+-- Stop/cleanup UI resources
+function UI.stop()
+	if UI._menubar then
+		print("[UI] Removing menubar")
+		UI._menubar:delete()
+		UI._menubar = nil
+	end
+	if UI.commandPalette then
+		print("[UI] Removing command palette")
+		UI.commandPalette:delete()
+		UI.commandPalette = nil
+	end
 end
 
 -- Initialize the UI module
