@@ -1031,10 +1031,11 @@ function Actions.switchTab(direction)
 
 	-- If no tabs, pass the keystroke through to the application
 	if not tabCount or tabCount <= 1 then
+		local app = win:application()
 		if direction == "next" then
-			hs.eventtap.keyStroke({"cmd", "shift"}, "]", 0)
+			hs.eventtap.keyStroke({"cmd", "shift"}, "]", 0, app)
 		else
-			hs.eventtap.keyStroke({"cmd", "shift"}, "[", 0)
+			hs.eventtap.keyStroke({"cmd", "shift"}, "[", 0, app)
 		end
 		return
 	end
