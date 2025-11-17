@@ -177,37 +177,70 @@ function Windows.updateZOrder(cols, focusedWindowId)
 		return
 	end
 
-	local totalWindowCount = #flatten(cols)
 	local _, _, focusedColIdx = Windows.locateWindow(focusedWindowId)
 	if not focusedColIdx then
 		return
 	end
 
-	-- Build desired front-to-back order
+	-- Get screen frame from focused window to calculate visibility
+	local focusedWin = Windows.getWindow(focusedWindowId)
+	if not focusedWin then
+		return
+	end
+	local screen = focusedWin:screen()
+	if not screen then
+		return
+	end
+	local screenFrame = screen:frame()
+
+	-- Helper to check if a window is visible (>50% on screen)
+	local function isWindowVisible(winId)
+		local win = Windows.getWindow(winId)
+		if not win then
+			return false
+		end
+		local frame = win:frame()
+		local winLeft = frame.x
+		local winRight = frame.x + frame.w
+		local screenLeft = screenFrame.x
+		local screenRight = screenFrame.x + screenFrame.w
+
+		local visibleLeft = math.max(winLeft, screenLeft)
+		local visibleRight = math.min(winRight, screenRight)
+		local visibleWidth = math.max(0, visibleRight - visibleLeft)
+		local percentVisible = visibleWidth / frame.w
+
+		return percentVisible > 0.50
+	end
+
+	-- Build desired front-to-back order (only visible windows)
 	local ordered = {}
 
-	-- Helper to append all windows from a column (optionally skipping one)
+	-- Helper to append visible windows from a column (optionally skipping one)
 	local function appendColumn(colIdx, skipId)
 		local col = cols[colIdx]
 		if not col then
 			return
 		end
 		for _, id in ipairs(col) do
-			if id ~= skipId then
+			if id ~= skipId and isWindowVisible(id) then
 				table.insert(ordered, id)
 			end
 		end
 	end
 
-	-- 1. Focused window
-	table.insert(ordered, focusedWindowId)
+	-- 1. Focused window (always include if visible)
+	if isWindowVisible(focusedWindowId) then
+		table.insert(ordered, focusedWindowId)
+	end
 
 	-- 2. Other rows in the same column
 	appendColumn(focusedColIdx, focusedWindowId)
 
 	-- 3. Columns farther from focus: left-1, right-1, left-2, right-2, …
 	local offset = 1
-	while #ordered < totalWindowCount do
+	local maxOffset = #cols
+	while offset <= maxOffset do
 		local leftIdx = focusedColIdx - offset
 		local rightIdx = focusedColIdx + offset
 		if leftIdx >= 1 then
