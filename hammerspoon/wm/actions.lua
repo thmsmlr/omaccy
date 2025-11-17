@@ -301,8 +301,26 @@ function Actions.moveWindowToNextScreen()
 
 	table.insert(state.screens[nextScreenId][nextSpace].cols, { currentWindowId })
 	table.remove(state.screens[currentScreenId][currentSpace].cols[currentColIdx], currentRowIdx)
+	local columnWasRemoved = false
 	if #state.screens[currentScreenId][currentSpace].cols[currentColIdx] == 0 then
 		table.remove(state.screens[currentScreenId][currentSpace].cols, currentColIdx)
+		columnWasRemoved = true
+	end
+
+	-- Clear height ratios for source column
+	if state.columnHeightRatios[currentScreenId] and state.columnHeightRatios[currentScreenId][currentSpace] then
+		local spaceRatios = state.columnHeightRatios[currentScreenId][currentSpace]
+		if columnWasRemoved then
+			local maxIdx = 0
+			for k in pairs(spaceRatios) do
+				if k > maxIdx then maxIdx = k end
+			end
+			for i = currentColIdx, maxIdx do
+				spaceRatios[i] = spaceRatios[i + 1]
+			end
+		else
+			spaceRatios[currentColIdx] = nil
+		end
 	end
 
 	retile(currentScreenId, currentSpace)
@@ -333,6 +351,22 @@ function Actions.slurp()
 
 	-- Remove the right column
 	table.remove(cols, colIdx + 1)
+
+	-- Clear height ratios for affected column and shift remaining indices
+	if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][spaceId] then
+		local spaceRatios = state.columnHeightRatios[screenId][spaceId]
+		-- Clear the slurped column (now has different windows)
+		spaceRatios[colIdx] = nil
+		-- Shift ratios for columns after the removed one
+		local maxIdx = 0
+		for k in pairs(spaceRatios) do
+			if k > maxIdx then maxIdx = k end
+		end
+		for i = colIdx + 1, maxIdx do
+			spaceRatios[i] = spaceRatios[i + 1]
+		end
+		spaceRatios[maxIdx + 1] = nil
+	end
 
 	-- Make all windows in the slurped column have the same height
 	local screenFrame = hs.screen(screenId):frame()
@@ -384,6 +418,22 @@ function Actions.barf()
 		return
 	end
 	table.insert(cols, colIdx + 1, { removedWin })
+
+	-- Clear height ratios for affected columns and shift indices
+	if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][spaceId] then
+		local spaceRatios = state.columnHeightRatios[screenId][spaceId]
+		-- Clear the source column (lost a window)
+		spaceRatios[colIdx] = nil
+		-- Shift ratios for columns after the insertion point
+		local maxIdx = 0
+		for k in pairs(spaceRatios) do
+			if k > maxIdx then maxIdx = k end
+		end
+		for i = maxIdx, colIdx + 1, -1 do
+			spaceRatios[i + 1] = spaceRatios[i]
+		end
+		spaceRatios[colIdx + 1] = nil -- New column has single window
+	end
 
 	-- Make all windows in the affected columns have the same height
 	local screenFrame = hs.screen(screenId):frame()
@@ -584,8 +634,26 @@ function Actions.moveFocusedWindowToSpace(spaceId)
 	Events.pauseWatcher()
 
 	local removedWin = table.remove(state.screens[screenId][currentSpace].cols[colIdx], rowIdx)
+	local columnWasRemoved = false
 	if #state.screens[screenId][currentSpace].cols[colIdx] == 0 then
 		table.remove(state.screens[screenId][currentSpace].cols, colIdx)
+		columnWasRemoved = true
+	end
+
+	-- Clear height ratios for source column
+	if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][currentSpace] then
+		local spaceRatios = state.columnHeightRatios[screenId][currentSpace]
+		if columnWasRemoved then
+			local maxIdx = 0
+			for k in pairs(spaceRatios) do
+				if k > maxIdx then maxIdx = k end
+			end
+			for i = colIdx, maxIdx do
+				spaceRatios[i] = spaceRatios[i + 1]
+			end
+		else
+			spaceRatios[colIdx] = nil
+		end
 	end
 
 	table.insert(state.screens[screenId][spaceId].cols, { removedWin })
@@ -772,6 +840,17 @@ function Actions.resizeFocusedWindowVertically(delta)
 		w:setFrame(f)
 		y = y + f.h + tileGap
 	end
+
+	-- Save height ratios to state
+	local ratios = {}
+	for i, h in ipairs(newHeights) do
+		ratios[i] = h / totalColHeight
+	end
+
+	-- Ensure nested tables exist
+	state.columnHeightRatios[screenId] = state.columnHeightRatios[screenId] or {}
+	state.columnHeightRatios[screenId][spaceId] = state.columnHeightRatios[screenId][spaceId] or {}
+	state.columnHeightRatios[screenId][spaceId][colIdx] = ratios
 end
 
 function Actions.closeFocusedWindow()

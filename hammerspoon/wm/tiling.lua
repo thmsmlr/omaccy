@@ -146,8 +146,36 @@ local function retile(state, screenId, spaceId, opts)
 		local n = #col
 		local totalGap = tileGap * (n - 1)
 		local availableHeight = screenFrame.h - totalGap
-		local baseHeight = math.floor(availableHeight / n)
-		local remainder = availableHeight - (baseHeight * n) -- Distribute remainder pixels
+
+		-- Check for stored height ratios
+		local storedRatios = state.columnHeightRatios[screenId]
+			and state.columnHeightRatios[screenId][spaceId]
+			and state.columnHeightRatios[screenId][spaceId][idx]
+		local useStoredRatios = storedRatios and #storedRatios == n
+
+		-- Calculate heights based on ratios or equal distribution
+		local heights = {}
+		if useStoredRatios then
+			-- Use stored ratios
+			local allocated = 0
+			for i = 1, n do
+				local h = math.floor(availableHeight * storedRatios[i])
+				heights[i] = h
+				allocated = allocated + h
+			end
+			-- Distribute leftover pixels to first windows
+			local leftover = availableHeight - allocated
+			for i = 1, leftover do
+				heights[i] = heights[i] + 1
+			end
+		else
+			-- Equal distribution (default)
+			local baseHeight = math.floor(availableHeight / n)
+			local remainder = availableHeight - (baseHeight * n)
+			for i = 1, n do
+				heights[i] = baseHeight + ((i <= remainder) and 1 or 0)
+			end
+		end
 
 		local colX = currentX
 		local rowY = y
@@ -163,7 +191,7 @@ local function retile(state, screenId, spaceId, opts)
 					),
 					y = rowY,
 					w = maxColWidth,
-					h = baseHeight + ((jdx <= remainder) and 1 or 0),
+					h = heights[jdx],
 				}
 
 				-- Determine if window will be visible on screen

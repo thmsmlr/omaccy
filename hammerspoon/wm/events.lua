@@ -412,6 +412,24 @@ function Events.init(wm)
 			columnWasRemoved = true
 		end
 
+		-- Clear height ratios for affected column
+		if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][spaceId] then
+			local spaceRatios = state.columnHeightRatios[screenId][spaceId]
+			if columnWasRemoved then
+				-- Shift ratios for columns after the removed one
+				local maxIdx = 0
+				for k in pairs(spaceRatios) do
+					if k > maxIdx then maxIdx = k end
+				end
+				for i = colIdx, maxIdx do
+					spaceRatios[i] = spaceRatios[i + 1]
+				end
+			else
+				-- Just clear the affected column
+				spaceRatios[colIdx] = nil
+			end
+		end
+
 		-- Auto-cleanup empty named spaces (but preserve numbered spaces 1-4)
 		local space = state.screens[screenId][spaceId]
 		local isEmptySpace = space and #space.cols == 0 and (not space.floating or #space.floating == 0)

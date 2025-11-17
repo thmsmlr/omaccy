@@ -52,12 +52,23 @@ local Settings <const> = hs.settings
         ...
     },
     -- Index into the window stack (for navigating backwards/forwards)
-    windowStackIndex -> number
+    windowStackIndex -> number,
 
     -- Urgent windows tracking
     urgentWindows -> {
         [windowId] = true,
         ...
+    },
+
+    -- Height ratios for windows in multi-row columns
+    -- Stored as proportions (0-1) that sum to 1 for each column
+    columnHeightRatios -> {
+        screenId -> {
+            spaceId -> {
+                colIdx -> { ratio1, ratio2, ... },  -- ratios matching window order
+                ...
+            }
+        }
     }
 }
 ]]--
@@ -71,6 +82,7 @@ local state = {
 	startXForScreenAndSpace = {},
 	fullscreenOriginalWidth = {},
 	urgentWindows = {},
+	columnHeightRatios = {},
 }
 
 ------------------------------------------
@@ -112,6 +124,7 @@ function State.reset()
 	state.startXForScreenAndSpace = {}
 	state.fullscreenOriginalWidth = {}
 	state.urgentWindows = {}
+	state.columnHeightRatios = {}
 end
 
 -- Save current state to persistent storage
@@ -373,6 +386,7 @@ function State.init(wm)
 	state.urgentWindows = savedState.urgentWindows or state.urgentWindows
 	state.activeSpaceForScreen = savedState.activeSpaceForScreen or state.activeSpaceForScreen
 	state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or state.startXForScreenAndSpace
+	state.columnHeightRatios = savedState.columnHeightRatios or state.columnHeightRatios
 	profile("restore non-window state")
 
 	-- 2a. Get all current windows once (expensive operation)
