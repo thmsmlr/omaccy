@@ -389,6 +389,9 @@ function Actions.slurp()
 	end
 
 	retile(screenId, spaceId)
+
+	-- Update Z-order to raise all windows in the slurped column
+	Windows.updateZOrder(cols, win:id())
 end
 
 function Actions.barf()
@@ -998,6 +1001,7 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 			retile(targetScreenId, targetSpaceId)
 			focusWindow(newWindow, function()
 				addToWindowStack(newWindow)
+				bringIntoView(newWindow)
 				centerMouseInWindow(newWindow)
 				Events.resumeWatcher()
 			end)
