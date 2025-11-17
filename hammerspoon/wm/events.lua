@@ -33,6 +33,8 @@ local updateMenubar
 -- Module state
 local windowWatcherPaused = false
 local windowWatcher = nil
+local watcherReenableAfter = 0  -- timestamp after which watcher should be re-enabled
+local watcherMonitorTimer = nil -- perpetual timer to check if watcher should be re-enabled
 
 ------------------------------------------
 -- Helper functions
@@ -76,22 +78,62 @@ end
 -- Window event handlers
 ------------------------------------------
 
-function Events.pauseWatcher()
+-- Disable watcher for a specified duration (in seconds)
+-- Multiple calls extend the disable period to the latest end time (debouncing)
+function Events.disableWatcherFor(duration)
+	duration = duration or 0.1
+	local newReenableTime = hs.timer.secondsSinceEpoch() + duration
+
+	-- Extend the disable period if this would end later
+	if newReenableTime > watcherReenableAfter then
+		watcherReenableAfter = newReenableTime
+	end
+
 	windowWatcherPaused = true
 end
 
+-- Legacy function for backward compatibility
+function Events.pauseWatcher()
+	Events.disableWatcherFor(0.1)
+end
+
+-- Legacy function for backward compatibility
+-- Sets the re-enable timestamp to now + delay (debounced with any existing disable)
 function Events.resumeWatcher(delay)
 	delay = delay or 0.1
-	hs.timer.doAfter(delay, function()
-		windowWatcherPaused = false
-	end)
+	local newReenableTime = hs.timer.secondsSinceEpoch() + delay
+
+	-- Extend the disable period if this would end later
+	if newReenableTime > watcherReenableAfter then
+		watcherReenableAfter = newReenableTime
+	end
 end
 
 function Events.isPaused()
 	return windowWatcherPaused
 end
 
+-- Start the perpetual timer that monitors and re-enables the watcher
+local function startWatcherMonitor()
+	if watcherMonitorTimer then return end
+
+	watcherMonitorTimer = hs.timer.doEvery(0.05, function()
+		if windowWatcherPaused and hs.timer.secondsSinceEpoch() >= watcherReenableAfter then
+			windowWatcherPaused = false
+		end
+	end)
+end
+
+-- Stop the monitor timer
+local function stopWatcherMonitor()
+	if watcherMonitorTimer then
+		watcherMonitorTimer:stop()
+		watcherMonitorTimer = nil
+	end
+end
+
 function Events.stop()
+	stopWatcherMonitor()
 	if windowWatcher then
 		print("[Events] Stopping window watcher")
 		windowWatcher:unsubscribeAll()
@@ -435,6 +477,10 @@ function Events.init(wm)
 		end
 	)
 	profile("subscribe fullscreen")
+
+	-- Start the monitor timer that re-enables the watcher after disable periods
+	startWatcherMonitor()
+	profile("start watcher monitor")
 
 	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
 	print(string.format("[Events] Module initialized - TOTAL: %.2fms", totalTime))
