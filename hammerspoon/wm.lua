@@ -294,6 +294,10 @@ function WM:scroll(direction, opts)
 	return WM.Actions.scroll(direction, opts)
 end
 
+function WM:switchTab(direction)
+	return WM.Actions.switchTab(direction)
+end
+
 function WM:launchOrFocusApp(appName, launchCommand, opts)
 	return WM.Actions.launchOrFocusApp(appName, launchCommand, opts)
 end
@@ -408,6 +412,153 @@ end
 
 hs.hotkey.bind({ "cmd", "ctrl" }, "t", function()
 	print(hs.inspect(state.screens))
+end)
+
+-- Tab switching with state management
+hs.hotkey.bind({ "cmd", "shift" }, "[", function()
+	WM:switchTab("prev")
+end)
+
+hs.hotkey.bind({ "cmd", "shift" }, "]", function()
+	WM:switchTab("next")
+end)
+
+-- Debug command: comprehensive state dump
+hs.hotkey.bind({ "cmd", "ctrl" }, "p", function()
+	print("\n" .. string.rep("=", 80))
+	print("WINDOW MANAGER DEBUG STATE")
+	print(string.rep("=", 80))
+
+	-- Focused window info
+	local focused = Window.focusedWindow()
+	if focused then
+		local fScreenId, fSpaceId, fColIdx, fRowIdx = locateWindow(focused:id())
+		print("\nFOCUSED WINDOW:")
+		print(string.format("  ID: %d | App: %s | Title: %s",
+			focused:id(),
+			focused:application():name(),
+			focused:title()))
+		if fColIdx then
+			print(string.format("  Location: screen=%s space=%s col=%d row=%d",
+				tostring(fScreenId), tostring(fSpaceId), fColIdx, fRowIdx))
+		else
+			print("  Location: NOT IN STATE")
+		end
+	end
+
+	-- All windows grouped by app
+	print("\nALL WINDOWS BY APP:")
+	local windowsByApp = {}
+	for _, win in ipairs(Window.allWindows()) do
+		if win:isStandard() and win:isVisible() then
+			local appName = win:application():name()
+			if not windowsByApp[appName] then
+				windowsByApp[appName] = {}
+			end
+			table.insert(windowsByApp[appName], win)
+		end
+	end
+
+	for appName, windows in pairs(windowsByApp) do
+		print(string.format("\n  %s (%d window%s):",
+			appName,
+			#windows,
+			#windows == 1 and "" or "s"))
+		for _, win in ipairs(windows) do
+			local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
+			local inState = colIdx ~= nil
+			local locationStr
+			if inState then
+				locationStr = string.format("screen=%s space=%s col=%d row=%d",
+					tostring(screenId), tostring(spaceId), colIdx, rowIdx)
+			else
+				locationStr = "NOT IN STATE"
+			end
+			local isFocused = focused and win:id() == focused:id()
+			print(string.format("    %s ID=%d | %s | %s",
+				isFocused and "→" or " ",
+				win:id(),
+				win:title():sub(1, 40),
+				locationStr))
+		end
+	end
+
+	-- State structure
+	print("\nSTATE STRUCTURE:")
+	for screenId, spaces in pairs(state.screens) do
+		local screen = Screen(screenId)
+		local screenName = screen and screen:name() or "Unknown"
+		print(string.format("\n  Screen %s (%s):", screenId, screenName))
+
+		for spaceId, space in pairs(spaces) do
+			local isActive = state.activeSpaceForScreen[screenId] == spaceId
+			local startX = state.startXForScreenAndSpace[screenId] and
+				state.startXForScreenAndSpace[screenId][spaceId] or 0
+			print(string.format("    Space %s %s (startX=%.0f):",
+				tostring(spaceId),
+				isActive and "[ACTIVE]" or "",
+				startX))
+
+			for colIdx, col in ipairs(space.cols) do
+				print(string.format("      Col %d:", colIdx))
+				for rowIdx, winId in ipairs(col) do
+					local win = Window(winId)
+					local exists = win ~= nil
+					local title = exists and win:title():sub(1, 30) or "MISSING"
+					local appName = exists and win:application():name() or "?"
+					print(string.format("        [%d] ID=%d %s | %s | %s",
+						rowIdx,
+						winId,
+						exists and "✓" or "✗",
+						appName,
+						title))
+				end
+			end
+
+			if space.floating and #space.floating > 0 then
+				print("      Floating:")
+				for _, winId in ipairs(space.floating) do
+					local win = Window(winId)
+					local exists = win ~= nil
+					local title = exists and win:title():sub(1, 30) or "MISSING"
+					print(string.format("        ID=%d %s | %s",
+						winId,
+						exists and "✓" or "✗",
+						title))
+				end
+			end
+		end
+	end
+
+	-- Window stack
+	print("\nWINDOW STACK (MRU order):")
+	for i, winId in ipairs(state.windowStack) do
+		local win = Window(winId)
+		local exists = win ~= nil
+		local title = exists and win:title():sub(1, 40) or "MISSING"
+		local appName = exists and win:application():name() or "?"
+		print(string.format("  %d. ID=%d %s | %s | %s",
+			i, winId, exists and "✓" or "✗", appName, title))
+		if i >= 10 then
+			print("  ... (truncated)")
+			break
+		end
+	end
+
+	-- Urgent windows
+	if next(state.urgentWindows) then
+		print("\nURGENT WINDOWS:")
+		for winId, _ in pairs(state.urgentWindows) do
+			local win = Window(winId)
+			local exists = win ~= nil
+			local title = exists and win:title() or "MISSING"
+			print(string.format("  ID=%d %s | %s", winId, exists and "✓" or "✗", title))
+		end
+	end
+
+	print("\n" .. string.rep("=", 80))
+	print("Press Cmd+Ctrl+P to refresh")
+	print(string.rep("=", 80) .. "\n")
 end)
 
 return WM

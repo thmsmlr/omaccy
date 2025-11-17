@@ -124,32 +124,67 @@ function Actions.focusDirection(direction)
 	Events.pauseWatcher()
 	local focusedWindow = hs.window.focusedWindow()
 	if not focusedWindow then
+		Events.resumeWatcher()
 		return
 	end
 	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(focusedWindow:id())
 
 	if not currentColIdx then
+		Events.resumeWatcher()
 		return
 	end
-	if direction == "left" then
-		currentColIdx = currentColIdx - 1
-		if currentColIdx < 1 then
-			return
-		end
-		currentRowIdx = earliestIndexInList(
-			state.screens[currentScreenId][currentSpace].cols[currentColIdx],
-			state.windowStack
-		) or 1
+
+	local cols = state.screens[currentScreenId][currentSpace].cols
+
+	-- Helper to check if a window exists
+	local function windowExists(winId)
+		return hs.window(winId) ~= nil
 	end
-	if direction == "right" then
-		currentColIdx = currentColIdx + 1
-		if currentColIdx > #state.screens[currentScreenId][currentSpace].cols then
-			return
+
+	if direction == "left" or direction == "right" then
+		local delta = (direction == "left") and -1 or 1
+		local targetColIdx = currentColIdx + delta
+
+		-- Keep searching in the direction until we find an existing window or hit bounds
+		while targetColIdx >= 1 and targetColIdx <= #cols do
+			local col = cols[targetColIdx]
+			if col and #col > 0 then
+				-- Find the best row (earliest in window stack, or first existing window)
+				local targetRowIdx = earliestIndexInList(col, state.windowStack) or 1
+				local targetWinId = col[targetRowIdx]
+
+				-- Check if this window exists
+				if windowExists(targetWinId) then
+					local nextWindow = getWindow(targetWinId)
+					focusWindow(nextWindow, function()
+						addToWindowStack(nextWindow)
+						bringIntoView(nextWindow)
+						centerMouseInWindow(nextWindow)
+						Events.resumeWatcher()
+					end)
+					return
+				end
+
+				-- Window doesn't exist, try other rows in this column
+				for rowIdx, winId in ipairs(col) do
+					if rowIdx ~= targetRowIdx and windowExists(winId) then
+						local nextWindow = getWindow(winId)
+						focusWindow(nextWindow, function()
+							addToWindowStack(nextWindow)
+							bringIntoView(nextWindow)
+							centerMouseInWindow(nextWindow)
+							Events.resumeWatcher()
+						end)
+						return
+					end
+				end
+			end
+			-- No valid window in this column, continue searching
+			targetColIdx = targetColIdx + delta
 		end
-		currentRowIdx = earliestIndexInList(
-			state.screens[currentScreenId][currentSpace].cols[currentColIdx],
-			state.windowStack
-		) or 1
+		-- No valid window found
+		Events.resumeWatcher()
+		return
 	end
 
 	if direction == "down" then
@@ -159,13 +194,22 @@ function Actions.focusDirection(direction)
 		currentRowIdx = currentRowIdx - 1
 	end
 	if currentRowIdx < 1 then
+		Events.resumeWatcher()
 		return
 	end
-	if currentRowIdx > #state.screens[currentScreenId][currentSpace].cols[currentColIdx] then
+	if currentRowIdx > #cols[currentColIdx] then
+		Events.resumeWatcher()
 		return
 	end
 
-	local nextWindow = getWindow(state.screens[currentScreenId][currentSpace].cols[currentColIdx][currentRowIdx])
+	local targetWinId = cols[currentColIdx][currentRowIdx]
+	if not windowExists(targetWinId) then
+		-- For up/down, just skip if window doesn't exist
+		Events.resumeWatcher()
+		return
+	end
+
+	local nextWindow = getWindow(targetWinId)
 	if nextWindow then
 		focusWindow(nextWindow, function()
 			addToWindowStack(nextWindow)
@@ -173,6 +217,8 @@ function Actions.focusDirection(direction)
 			centerMouseInWindow(nextWindow)
 			Events.resumeWatcher()
 		end)
+	else
+		Events.resumeWatcher()
 	end
 end
 
@@ -920,6 +966,154 @@ function Actions.scroll(direction, opts)
 		local key = (direction == "up" and "u") or "d"
 		hs.eventtap.keyStroke({ "ctrl" }, key, 0, win:application())
 	end
+end
+
+------------------------------------------
+-- Tab Navigation
+------------------------------------------
+
+-- Get current tab index using axuielement
+local function getCurrentTabIndex(win)
+	local ax = hs.axuielement.windowElement(win)
+	if not ax then
+		return 1
+	end
+
+	-- Find tab group recursively
+	local function findTabGroup(element, depth)
+		depth = depth or 0
+		if depth > 5 then return nil end
+
+		local role = element:attributeValue("AXRole")
+		if role == "AXTabGroup" then
+			return element
+		end
+
+		local children = element:attributeValue("AXChildren")
+		if children then
+			for _, child in ipairs(children) do
+				local result = findTabGroup(child, depth + 1)
+				if result then return result end
+			end
+		end
+		return nil
+	end
+
+	local tabGroup = findTabGroup(ax)
+	if not tabGroup then
+		return 1
+	end
+
+	local tabs = tabGroup:attributeValue("AXTabs")
+	if not tabs then
+		return 1
+	end
+
+	-- Find the selected tab (AXValue = true)
+	for i, tab in ipairs(tabs) do
+		local selected = tab:attributeValue("AXValue")
+		if selected == true or selected == 1 then
+			return i
+		end
+	end
+
+	return 1
+end
+
+-- Switch to next/previous tab and update window manager state
+function Actions.switchTab(direction)
+	local win = hs.window.focusedWindow()
+	if not win then
+		return
+	end
+
+	local tabCount = win:tabCount()
+
+	-- If no tabs, pass the keystroke through to the application
+	if not tabCount or tabCount <= 1 then
+		if direction == "next" then
+			hs.eventtap.keyStroke({"cmd", "shift"}, "]", 0)
+		else
+			hs.eventtap.keyStroke({"cmd", "shift"}, "[", 0)
+		end
+		return
+	end
+
+	-- Get current state before switching
+	local oldWinId = win:id()
+	local screenId, spaceId, colIdx, rowIdx = locateWindow(oldWinId)
+	local appName = win:application():name()
+
+	-- Get current tab index
+	local currentTabIdx = getCurrentTabIndex(win)
+
+	-- Calculate new tab index
+	local newTabIdx
+	if direction == "next" then
+		newTabIdx = currentTabIdx + 1
+		if newTabIdx > tabCount then
+			newTabIdx = 1 -- Wrap around
+		end
+	else
+		newTabIdx = currentTabIdx - 1
+		if newTabIdx < 1 then
+			newTabIdx = tabCount -- Wrap around
+		end
+	end
+
+	-- Switch tab
+	print(string.format("[switchTab] %s: tab %d -> %d (of %d)", appName, currentTabIdx, newTabIdx, tabCount))
+	win:focusTab(newTabIdx)
+
+	-- Give macOS a moment to update the window
+	hs.timer.doAfter(0.05, function()
+		local newWin = hs.window.focusedWindow()
+		if not newWin then
+			return
+		end
+
+		local newWinId = newWin:id()
+
+		-- If window ID changed and we had it in state, update state
+		if newWinId ~= oldWinId and screenId and colIdx then
+			print(string.format("[switchTab] Replacing window %d with %d in col %d", oldWinId, newWinId, colIdx))
+
+			-- Replace old window ID with new one in the state
+			local col = state.screens[screenId][spaceId].cols[colIdx]
+			if col then
+				for i, wid in ipairs(col) do
+					if wid == oldWinId then
+						col[i] = newWinId
+						break
+					end
+				end
+			end
+
+			-- Update window stack
+			for i, wid in ipairs(state.windowStack) do
+				if wid == oldWinId then
+					state.windowStack[i] = newWinId
+					break
+				end
+			end
+
+			-- Update fullscreen original width if present
+			if state.fullscreenOriginalWidth[oldWinId] then
+				state.fullscreenOriginalWidth[newWinId] = state.fullscreenOriginalWidth[oldWinId]
+				state.fullscreenOriginalWidth[oldWinId] = nil
+			end
+
+			-- Update urgent windows if present
+			if state.urgentWindows[oldWinId] then
+				state.urgentWindows[newWinId] = state.urgentWindows[oldWinId]
+				state.urgentWindows[oldWinId] = nil
+			end
+		elseif newWinId ~= oldWinId and not screenId then
+			-- Old window wasn't in state, add new one
+			print(string.format("[switchTab] Adding new window %d to state", newWinId))
+			addToWindowStack(newWin)
+		end
+	end)
 end
 
 ------------------------------------------

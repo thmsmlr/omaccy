@@ -98,6 +98,11 @@ local function buildCommandPaletteChoices(query)
 				actionType = "navigateToCreateSpace",
 				valid = false,
 			},
+			{
+				text = "Delete space",
+				subText = "Close all windows and delete current space",
+				actionType = "deleteSpace",
+			},
 		}
 
 		-- Apply fuzzy filtering to commands
@@ -406,6 +411,48 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 			WM:moveFocusedWindowToSpace(targetSpaceId)
 		elseif actionType == "renameSpace" then
 			WM:renameSpace(choice.screenId, choice.oldSpaceId, choice.newSpaceId)
+		elseif actionType == "deleteSpace" then
+			-- Delete current space and close all its windows
+			local currentScreen = Mouse.getCurrentScreen()
+			local currentScreenId = currentScreen:id()
+			local currentSpaceId = state.activeSpaceForScreen[currentScreenId]
+
+			-- Get all windows in this space
+			local space = state.screens[currentScreenId] and state.screens[currentScreenId][currentSpaceId]
+			if space and space.cols then
+				-- Close all windows in the space
+				for _, col in ipairs(space.cols) do
+					for _, winId in ipairs(col) do
+						local win = hs.window(winId)
+						if win then
+							win:close()
+						end
+					end
+				end
+			end
+
+			-- Find next space to switch to (MRU order, excluding current)
+			local spaceMRU = Spaces.getSpaceMRUOrder()
+			local nextSpaceId = 1 -- fallback
+			for _, spaceInfo in ipairs(spaceMRU) do
+				if spaceInfo.screenId == currentScreenId and spaceInfo.spaceId ~= currentSpaceId then
+					nextSpaceId = spaceInfo.spaceId
+					break
+				end
+			end
+
+			-- Remove the space from state
+			if state.screens[currentScreenId] then
+				state.screens[currentScreenId][currentSpaceId] = nil
+				if state.startXForScreenAndSpace[currentScreenId] then
+					state.startXForScreenAndSpace[currentScreenId][currentSpaceId] = nil
+				end
+			end
+
+			-- Switch to MRU space
+			state.activeSpaceForScreen[currentScreenId] = nextSpaceId
+			WM.Tiling.retile(currentScreenId, nextSpaceId)
+			UI.updateMenubar()
 		end
 
 		commandPaletteMode = "root"
