@@ -378,7 +378,6 @@ function Events.init(wm)
 		print("[windowDestroyed]", win:title(), win:id())
 
 		local winId = win:id()
-		local destroyedAppName = appName
 
 		-- Clean up urgentWindows unconditionally (before early return)
 		if state.urgentWindows[winId] then
@@ -394,7 +393,7 @@ function Events.init(wm)
 			return
 		end
 
-		-- Save position info before removal for tabbed window handling
+		-- Save position info before removal
 		local savedScreenId, savedSpaceId, savedColIdx, savedRowIdx = screenId, spaceId, colIdx, rowIdx
 
 		local col = state.screens[screenId][spaceId].cols[colIdx]
@@ -433,36 +432,22 @@ function Events.init(wm)
 		-- Clean up the window stack to remove any now-invalid windows
 		cleanWindowStack()
 
-		-- Retile all screens/spaces (could optimize to just affected ones)
-		retileAll()
-
-		-- Handle tabbed windows: check if macOS focused a sibling tab
-		hs.timer.doAfter(0.05, function()
-			local newFocused = hs.window.focusedWindow()
-			if not newFocused then
-				return
-			end
-
+		-- Check if focused window is untracked - if so, place it at the destroyed window's position
+		local newFocused = hs.window.focusedWindow()
+		if newFocused then
 			local newWinId = newFocused:id()
-			local newAppName = newFocused:application():name()
-
-			-- Check if new focused window is from the same app and not in state
-			if newAppName == destroyedAppName then
-				local existingScreenId = locateWindow(newWinId)
-				if not existingScreenId then
-					-- This is likely a sibling tab - insert it at the saved position
-					print(string.format("[windowDestroyed] Inserting sibling tab %d at col %d", newWinId, savedColIdx))
-
-					-- If the column was removed, we need to create it again
-					local targetColIdx = columnWasRemoved and savedColIdx or savedColIdx
-					local targetRowIdx = columnWasRemoved and 1 or savedRowIdx
-
-					insertWindowAtPosition(newWinId, savedScreenId, savedSpaceId, targetColIdx, targetRowIdx)
-					addToWindowStack(newFocused)
-					retile(savedScreenId, savedSpaceId)
-				end
+			local existingScreenId = locateWindow(newWinId)
+			if not existingScreenId then
+				local targetColIdx = columnWasRemoved and savedColIdx or savedColIdx
+				local targetRowIdx = columnWasRemoved and 1 or savedRowIdx
+				print(string.format("[windowDestroyed] Placing untracked window %d at col %d", newWinId, targetColIdx))
+				insertWindowAtPosition(newWinId, savedScreenId, savedSpaceId, targetColIdx, targetRowIdx)
+				addToWindowStack(newFocused)
 			end
-		end)
+		end
+
+		-- Retile all screens/spaces
+		retileAll()
 	end)
 	profile("subscribe windowDestroyed")
 
