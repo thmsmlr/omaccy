@@ -704,8 +704,8 @@ function Actions.toggleFullscreen()
 	end
 end
 
-function Actions.centerWindow()
-	local win = hs.window.focusedWindow()
+-- Helper to center a specific window in the view
+local function centerWindowInView(win)
 	if not win then
 		return
 	end
@@ -732,6 +732,11 @@ function Actions.centerWindow()
 	local startX = targetX - preWidth
 	state.startXForScreenAndSpace[screenId][spaceId] = startX
 	retile(screenId, spaceId)
+end
+
+function Actions.centerWindow()
+	local win = hs.window.focusedWindow()
+	centerWindowInView(win)
 end
 
 function Actions.resizeFocusedWindowHorizontally(delta)
@@ -941,7 +946,7 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 			local nextWindow = getWindow(nextWindowId)
 			focusWindow(nextWindow, function()
 				addToWindowStack(nextWindow)
-				bringIntoView(nextWindow)
+				centerWindowInView(nextWindow)
 				centerMouseInWindow(nextWindow)
 				Events.resumeWatcher()
 			end)
@@ -1001,7 +1006,7 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 			retile(targetScreenId, targetSpaceId)
 			focusWindow(newWindow, function()
 				addToWindowStack(newWindow)
-				bringIntoView(newWindow)
+				centerWindowInView(newWindow)
 				centerMouseInWindow(newWindow)
 				Events.resumeWatcher()
 			end)
