@@ -14,7 +14,7 @@ local Urgency = nil
 local Windows = nil
 
 -- UI state
-local commandPaletteMode = "root" -- "root", "moveWindowToSpace", "renameSpace", "createSpace"
+local commandPaletteMode = "root" -- "root", "moveWindowToSpace", "renameSpace", "createSpace", "confirmDeleteSpace"
 local modeStack = {} -- Stack of previous modes for escape-to-go-back
 local previousChoicesCount = 0
 
@@ -101,7 +101,8 @@ local function buildCommandPaletteChoices(query)
 			{
 				text = "Delete space",
 				subText = "Close all windows and delete current space",
-				actionType = "deleteSpace",
+				actionType = "navigateToDeleteSpace",
+				valid = false,
 			},
 		}
 
@@ -200,6 +201,35 @@ local function buildCommandPaletteChoices(query)
 		end
 
 		return choices
+	elseif commandPaletteMode == "confirmDeleteSpace" then
+		local currentScreen = Mouse.getCurrentScreen()
+		local currentScreenId = currentScreen:id()
+		local currentSpaceId = state.activeSpaceForScreen[currentScreenId]
+
+		-- Count windows in this space
+		local windowCount = 0
+		local space = state.screens[currentScreenId] and state.screens[currentScreenId][currentSpaceId]
+		if space and space.cols then
+			for _, col in ipairs(space.cols) do
+				windowCount = windowCount + #col
+			end
+		end
+
+		local spaceName = type(currentSpaceId) == "string" and ("'" .. currentSpaceId .. "'") or ("space " .. currentSpaceId)
+		local windowText = windowCount == 1 and "1 window" or (windowCount .. " windows")
+
+		return {
+			{
+				text = "Yes, delete " .. spaceName,
+				subText = "This will close " .. windowText .. " and cannot be undone",
+				actionType = "confirmDeleteSpace",
+			},
+			{
+				text = "No, cancel",
+				subText = "Go back without deleting",
+				actionType = "cancelDelete",
+			},
+		}
 	end
 
 	return {}
@@ -411,7 +441,7 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 			WM:moveFocusedWindowToSpace(targetSpaceId)
 		elseif actionType == "renameSpace" then
 			WM:renameSpace(choice.screenId, choice.oldSpaceId, choice.newSpaceId)
-		elseif actionType == "deleteSpace" then
+		elseif actionType == "confirmDeleteSpace" then
 			-- Delete current space and close all its windows
 			local currentScreen = Mouse.getCurrentScreen()
 			local currentScreenId = currentScreen:id()
@@ -453,6 +483,8 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 			state.activeSpaceForScreen[currentScreenId] = nextSpaceId
 			WM.Tiling.retile(currentScreenId, nextSpaceId)
 			UI.updateMenubar()
+		elseif actionType == "cancelDelete" then
+			-- Just close, reset handled below
 		end
 
 		commandPaletteMode = "root"
@@ -483,6 +515,13 @@ function UI.init(wm, stateRef, spacesModule, urgencyModule, windowsModule)
 			print("[commandPalette] Navigating to createSpace mode")
 			table.insert(modeStack, commandPaletteMode)
 			commandPaletteMode = "createSpace"
+			UI.commandPalette:query("")
+			local choices = buildCommandPaletteChoices()
+			UI.commandPalette:choices(choices)
+		elseif actionType == "navigateToDeleteSpace" then
+			print("[commandPalette] Navigating to confirmDeleteSpace mode")
+			table.insert(modeStack, commandPaletteMode)
+			commandPaletteMode = "confirmDeleteSpace"
 			UI.commandPalette:query("")
 			local choices = buildCommandPaletteChoices()
 			UI.commandPalette:choices(choices)
