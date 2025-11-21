@@ -865,6 +865,124 @@ function Actions.closeFocusedWindow()
 end
 
 ------------------------------------------
+-- App Window Utilities (shared by launchOrFocusApp and URLs module)
+------------------------------------------
+
+-- Find a window of a specific app on a specific space
+function Actions.findAppWindowOnSpace(bundleID, targetScreenId, targetSpaceId)
+	if not targetScreenId or not targetSpaceId then
+		return nil
+	end
+	if not state.screens[targetScreenId] then
+		return nil
+	end
+	local space = state.screens[targetScreenId][targetSpaceId]
+	if not space then
+		return nil
+	end
+
+	-- Collect all window IDs in this space
+	local windowsInSpace = {}
+	for _, col in ipairs(space.cols or {}) do
+		for _, winId in ipairs(col) do
+			windowsInSpace[winId] = true
+		end
+	end
+	for _, winId in ipairs(space.floating or {}) do
+		windowsInSpace[winId] = true
+	end
+
+	-- Find a window of the app in this space
+	local app = hs.application.get(bundleID)
+	if not app then
+		return nil
+	end
+
+	for _, win in ipairs(app:allWindows()) do
+		if windowsInSpace[win:id()] and win:isStandard() then
+			return win
+		end
+	end
+	return nil
+end
+
+-- Wait for a new window to appear (helper for launching)
+local function waitForNewWindow(windowsBefore, bundleID, attempts, callback)
+	if attempts <= 0 then
+		print("[Actions] Gave up waiting for new window")
+		return
+	end
+	for _, win in ipairs(hs.window.allWindows()) do
+		if not windowsBefore[win:id()] then
+			local app = win:application()
+			if app and app:bundleID() == bundleID then
+				callback(win)
+				return
+			end
+		end
+	end
+	hs.timer.doAfter(0.025, function()
+		waitForNewWindow(windowsBefore, bundleID, attempts - 1, callback)
+	end)
+end
+
+-- Launch a new app window and place it on a specific space
+-- opts.menuPath: menu items to create new window (e.g. {"File", "New Window"})
+-- opts.launchCommand: fallback command if app not running
+-- opts.colIdx: column index to place window (default 1)
+-- opts.onWindowReady: callback(win) when window is placed
+function Actions.launchAppWindowOnSpace(bundleID, targetScreenId, targetSpaceId, opts)
+	opts = opts or {}
+	local menuPath = opts.menuPath or { "File", "New Window" }
+	local launchCommand = opts.launchCommand
+	local colIdx = opts.colIdx or 1
+	local onWindowReady = opts.onWindowReady
+
+	local app = hs.application.get(bundleID)
+
+	-- Track windows before launch
+	local windowsBefore = {}
+	for _, win in ipairs(hs.window.allWindows()) do
+		windowsBefore[win:id()] = true
+	end
+
+	-- Callback when new window appears
+	local function handleNewWindow(win)
+		print(string.format("[Actions] New window detected: %d", win:id()))
+		-- Place in target space
+		if targetScreenId and targetSpaceId and state.screens[targetScreenId] and state.screens[targetScreenId][targetSpaceId] then
+			table.insert(state.screens[targetScreenId][targetSpaceId].cols, colIdx, { win:id() })
+			retile(targetScreenId, targetSpaceId)
+			focusWindow(win, function()
+				addToWindowStack(win)
+				centerMouseInWindow(win)
+			end)
+		end
+		if onWindowReady then
+			onWindowReady(win)
+		end
+	end
+
+	-- Launch via menu if app is running, otherwise use launch command
+	if app and app:isRunning() then
+		app:activate()
+		local didLaunch = app:selectMenuItem(menuPath)
+		if didLaunch then
+			waitForNewWindow(windowsBefore, bundleID, 20, handleNewWindow)
+			return true
+		end
+	end
+
+	if launchCommand then
+		hs.execute(launchCommand, false)
+		waitForNewWindow(windowsBefore, bundleID, 40, handleNewWindow)
+		return true
+	end
+
+	return false
+end
+
+------------------------------------------
 -- App Launching
 ------------------------------------------
 

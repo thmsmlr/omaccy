@@ -17,6 +17,34 @@ WM.tileGap = 10
 WM.resizeStep = 200
 WM.scrollSpeed = 400
 
+-- Browser configuration for URL handling
+WM.browserConfig = {
+	bundleID = "com.google.Chrome",
+	menuNewWindow = { "File", "New Window" },
+	-- AppleScript to open URL in a window at position (x, y)
+	openURLInWindowScript = function(x, y, url)
+		return string.format([[
+			tell application "Google Chrome"
+				repeat with w in windows
+					set b to bounds of w
+					if (item 1 of b) is %d and (item 2 of b) is %d then
+						tell w to make new tab with properties {URL:"%s"}
+						exit repeat
+					end if
+				end repeat
+			end tell
+		]], x, y, url)
+	end,
+	-- AppleScript to set URL of active tab in front window
+	setURLScript = function(url)
+		return string.format([[
+			tell application "Google Chrome"
+				tell front window to set URL of active tab to "%s"
+			end tell
+		]], url)
+	end,
+}
+
 local Application <const> = hs.application
 local Axuielement <const> = hs.axuielement
 local Event <const> = hs.eventtap.event
@@ -40,6 +68,7 @@ WM.Urgency = dofile(hs.configdir .. "/wm/urgency.lua")
 WM.UI = dofile(hs.configdir .. "/wm/ui.lua")
 WM.Events = dofile(hs.configdir .. "/wm/events.lua")
 WM.Actions = dofile(hs.configdir .. "/wm/actions.lua")
+WM.URLs = dofile(hs.configdir .. "/wm/urls.lua")
 
 -- Get state reference from State module
 local state = WM.State.get()
@@ -373,11 +402,15 @@ function WM:init()
 	WM.Actions.init(WM)
 	profile("Actions.init")
 
-	-- 9. Clean window stack
+	-- 9. Initialize URLs module (same-space URL handling)
+	WM.URLs.init(WM)
+	profile("URLs.init")
+
+	-- 10. Clean window stack
 	cleanWindowStack()
 	profile("cleanWindowStack")
 
-	-- 10. Retile all spaces
+	-- 11. Retile all spaces
 	local retileStart = hs.timer.secondsSinceEpoch()
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
