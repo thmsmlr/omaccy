@@ -1125,8 +1125,66 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 end
 
 ------------------------------------------
--- Scrolling
+-- Scrolling & Panning
 ------------------------------------------
+
+-- Pan the viewport horizontally by delta pixels (positive = right, negative = left)
+-- Clamps to prevent panning past first/last window
+function Actions.panViewport(delta)
+	local screen = hs.mouse.getCurrentScreen()
+	if not screen then
+		return
+	end
+	local screenId = screen:id()
+	local spaceId = state.activeSpaceForScreen[screenId]
+	if not spaceId then
+		return
+	end
+
+	local cols = state.screens[screenId][spaceId].cols
+	if not cols or #cols == 0 then
+		return
+	end
+
+	-- Calculate total width of all windows
+	local totalWidth = 0
+	for _, col in ipairs(cols) do
+		local maxColWidth = 0
+		for _, winId in ipairs(col) do
+			local win = getWindow(winId)
+			if win then
+				local w = win:frame().w
+				if w > maxColWidth then
+					maxColWidth = w
+				end
+			end
+		end
+		totalWidth = totalWidth + maxColWidth + tileGap
+	end
+	totalWidth = totalWidth - tileGap -- no gap after last column
+
+	local screenFrame = screen:frame()
+	local currentStartX = state.startXForScreenAndSpace[screenId][spaceId] or 0
+	local newStartX = currentStartX + delta
+
+	-- Clamp: don't pan past left edge of first window (startX <= 0)
+	-- and don't pan past right edge of last window
+	local minStartX = screenFrame.w - totalWidth
+	local maxStartX = 0
+
+	if minStartX > maxStartX then
+		-- All windows fit on screen, center them
+		minStartX = (screenFrame.w - totalWidth) / 2
+		maxStartX = minStartX
+	end
+
+	newStartX = math.max(minStartX, math.min(maxStartX, newStartX))
+
+	if newStartX ~= currentStartX then
+		state.startXForScreenAndSpace[screenId][spaceId] = newStartX
+		retile(screenId, spaceId, { duration = 0 })
+	end
+end
 
 function Actions.scroll(direction, opts)
 	local ignoreApps = opts.ignoreApps or {}

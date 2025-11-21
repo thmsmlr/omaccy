@@ -19,6 +19,7 @@ Movement shortcuts:
 - i/o: slurp/barf window
 - tab: next screen
 - shift+tab: move window to next screen
+- scroll: pan viewport left/right (with cmd+ctrl held)
 
 
 ]]
@@ -257,3 +258,30 @@ hs.hotkey.bind({ "cmd", "ctrl", "shift" }, "r", function()
 	WM:saveState()
 	hs.reload()
 end)
+
+------------------------------------------
+-- Scroll-to-pan: cmd+ctrl+scroll slides windows left/right
+------------------------------------------
+-- Customize WM.panSpeed in wm.lua to adjust sensitivity.
+-- Momentum scrolling is preserved (not flattened) for natural trackpad feel.
+-- Clamped to prevent panning past first/last window.
+WM.scrollPanTap = hs.eventtap.new({ hs.eventtap.event.types.scrollWheel }, function(e)
+	local flags = e:getFlags()
+
+	-- Only intercept when cmd+ctrl held (without shift)
+	if not (flags.cmd and flags.ctrl and not flags.shift) then
+		return false
+	end
+
+	-- Use pointDelta for smooth scrolling (trackpad/mouse), fall back to regular delta
+	local delta = e:getProperty(hs.eventtap.event.properties.scrollWheelEventPointDeltaAxis1)
+		or e:getProperty(hs.eventtap.event.properties.scrollWheelEventDeltaAxis1)
+		or 0
+
+	if delta ~= 0 then
+		WM:panViewport(delta * WM.panSpeed)
+	end
+
+	return true -- consume the event
+end)
+WM.scrollPanTap:start()

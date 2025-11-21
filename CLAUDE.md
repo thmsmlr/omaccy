@@ -52,3 +52,4 @@ print(string.format("%.2fms", (hs.timer.secondsSinceEpoch() - start) * 1000))
 - Never commit changes before the user has personally verified them unless otherwise instructed
 - The `WM` global is exposed for external script access via `hs.ipc`
 - Hotkey conventions: `CMD+CTRL` for focus, `CMD+SHIFT+CTRL` for moving/modifying windows
+- never run `hs.reload` in the same bash command as another `hs` command, it hangs. Always run them as separate Bash tool calls.

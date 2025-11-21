@@ -16,6 +16,7 @@ WM.log.setLogLevel("debug")
 WM.tileGap = 10
 WM.resizeStep = 200
 WM.scrollSpeed = 400
+WM.panSpeed = 15 -- pixels per scroll wheel tick for cmd+ctrl+scroll panning
 
 -- Browser configuration for URL handling
 WM.browserConfig = {
@@ -321,6 +322,10 @@ end
 
 function WM:scroll(direction, opts)
 	return WM.Actions.scroll(direction, opts)
+end
+
+function WM:panViewport(delta)
+	return WM.Actions.panViewport(delta)
 end
 
 function WM:switchTab(direction)
