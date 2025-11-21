@@ -53,6 +53,9 @@ local scrollSpeed
 ------------------------------------------
 
 function Actions.navigateStack(direction)
+	-- Suppress focus commits so they don't reset our stack position
+	Events.suppressFocus()
+
 	if direction == "in" then
 		state.windowStackIndex = state.windowStackIndex - 1
 	end
@@ -109,28 +112,25 @@ function Actions.navigateStack(direction)
 		updateMenubar()
 	end
 
-	Events.pauseWatcher()
 	focusWindow(win, function()
+		-- Don't add to stack - we're navigating the existing stack
 		-- Only bringIntoView if we're not switching spaces (already positioned correctly)
 		if not switchingSpaces then
 			bringIntoView(win)
 		end
 		centerMouseInWindow(win)
-		Events.resumeWatcher()
+		Events.resumeFocus()
 	end)
 end
 
 function Actions.focusDirection(direction)
-	Events.pauseWatcher()
 	local focusedWindow = hs.window.focusedWindow()
 	if not focusedWindow then
-		Events.resumeWatcher()
 		return
 	end
 	local currentScreenId, currentSpace, currentColIdx, currentRowIdx = locateWindow(focusedWindow:id())
 
 	if not currentColIdx then
-		Events.resumeWatcher()
 		return
 	end
 
@@ -160,7 +160,6 @@ function Actions.focusDirection(direction)
 						addToWindowStack(nextWindow)
 						bringIntoView(nextWindow)
 						centerMouseInWindow(nextWindow)
-						Events.resumeWatcher()
 					end)
 					return
 				end
@@ -173,7 +172,6 @@ function Actions.focusDirection(direction)
 							addToWindowStack(nextWindow)
 							bringIntoView(nextWindow)
 							centerMouseInWindow(nextWindow)
-							Events.resumeWatcher()
 						end)
 						return
 					end
@@ -183,7 +181,6 @@ function Actions.focusDirection(direction)
 			targetColIdx = targetColIdx + delta
 		end
 		-- No valid window found
-		Events.resumeWatcher()
 		return
 	end
 
@@ -194,18 +191,15 @@ function Actions.focusDirection(direction)
 		currentRowIdx = currentRowIdx - 1
 	end
 	if currentRowIdx < 1 then
-		Events.resumeWatcher()
 		return
 	end
 	if currentRowIdx > #cols[currentColIdx] then
-		Events.resumeWatcher()
 		return
 	end
 
 	local targetWinId = cols[currentColIdx][currentRowIdx]
 	if not windowExists(targetWinId) then
 		-- For up/down, just skip if window doesn't exist
-		Events.resumeWatcher()
 		return
 	end
 
@@ -215,10 +209,7 @@ function Actions.focusDirection(direction)
 			addToWindowStack(nextWindow)
 			bringIntoView(nextWindow)
 			centerMouseInWindow(nextWindow)
-			Events.resumeWatcher()
 		end)
-	else
-		Events.resumeWatcher()
 	end
 end
 
@@ -470,8 +461,6 @@ end
 ------------------------------------------
 
 function Actions.switchToSpace(spaceId)
-	Events.pauseWatcher()
-
 	local currentScreen = hs.mouse.getCurrentScreen()
 	local screenId = currentScreen:id()
 
@@ -542,11 +531,7 @@ function Actions.switchToSpace(spaceId)
 		focusWindow(nextWindow, function()
 			addToWindowStack(nextWindow)
 			centerMouseInWindow(nextWindow)
-			Events.resumeWatcher()
 		end)
-	else
-		-- When switching to an empty space, delay re-enabling the watcher
-		Events.resumeWatcher(0.2)
 	end
 end
 
@@ -634,8 +619,6 @@ function Actions.moveFocusedWindowToSpace(spaceId)
 		return
 	end
 
-	Events.pauseWatcher()
-
 	local removedWin = table.remove(state.screens[screenId][currentSpace].cols[colIdx], rowIdx)
 	local columnWasRemoved = false
 	if #state.screens[screenId][currentSpace].cols[colIdx] == 0 then
@@ -662,8 +645,6 @@ function Actions.moveFocusedWindowToSpace(spaceId)
 	table.insert(state.screens[screenId][spaceId].cols, { removedWin })
 	retile(screenId, currentSpace)
 	Actions.switchToSpace(spaceId)
-
-	Events.resumeWatcher()
 end
 
 ------------------------------------------
@@ -931,7 +912,6 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 		local nextWindowIdx = earliestIndexInList(candidateWindowIds, state.windowStack)
 		local nextWindowId = candidateWindowIds[nextWindowIdx] or candidateWindowIds[1]
 		if nextWindowId then
-			Events.pauseWatcher()
 			local screenId, spaceId, _, _ = locateWindow(nextWindowId)
 			if not screenId or not spaceId then
 				return
@@ -948,7 +928,6 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 				addToWindowStack(nextWindow)
 				centerWindowInView(nextWindow)
 				centerMouseInWindow(nextWindow)
-				Events.resumeWatcher()
 			end)
 			return
 		end
@@ -1008,12 +987,9 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 				addToWindowStack(newWindow)
 				centerWindowInView(newWindow)
 				centerMouseInWindow(newWindow)
-				Events.resumeWatcher()
 			end)
 		end)
 	end
-
-	Events.pauseWatcher()
 
 	if launchViaMenu then
 		if app and app:isRunning() then

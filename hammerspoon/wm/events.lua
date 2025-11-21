@@ -2,7 +2,11 @@
 Events Module
 
 Handles all window event watching and handlers for the window manager.
-Manages focus tracking, window creation/destruction, and watcher pause/resume logic.
+Uses a reconciliation-based approach: events trigger a diff of actual vs tracked
+window state, making the system resilient to unreliable macOS window events.
+
+Focus tracking uses debouncing to filter out spurious focus events during
+rapid window create/destroy cycles.
 
 Dependencies: state, windows, tiling, spaces, urgency
 ]]
@@ -31,18 +35,89 @@ local clearWindowUrgent
 local updateMenubar
 
 -- Module state
-local windowWatcherPaused = false
 local windowWatcher = nil
-local watcherReenableAfter = 0  -- timestamp after which watcher should be re-enabled
-local watcherMonitorTimer = nil -- perpetual timer to check if watcher should be re-enabled
+local reconcileTimer = nil      -- debounce timer for reconciliation
+local focusCommitTimer = nil    -- debounce timer for focus tracking
+local pendingFocusWinId = nil   -- pending focus to commit after settling
+local suppressFocusCommit = false -- flag to suppress focus commits during WM operations
 
 ------------------------------------------
 -- Helper functions
 ------------------------------------------
 
--- Insert a window into state at a specific position, creating the column if needed
-local function insertWindowAtPosition(winId, screenId, spaceId, colIdx, rowIdx)
-	-- Ensure screen/space structure exists
+-- Remove a window from state given its position
+local function removeWindowFromState(winId, pos)
+	local space = state.screens[pos.screenId] and state.screens[pos.screenId][pos.spaceId]
+	if not space then return false end
+
+	local col = space.cols[pos.colIdx]
+	if not col then return false end
+
+	-- Remove window from column
+	for i = #col, 1, -1 do
+		if col[i] == winId then
+			table.remove(col, i)
+			break
+		end
+	end
+
+	-- Track if column was removed for ratio shifting
+	local columnWasRemoved = false
+	if #col == 0 then
+		table.remove(space.cols, pos.colIdx)
+		columnWasRemoved = true
+	end
+
+	-- Clear/shift height ratios
+	if state.columnHeightRatios[pos.screenId] and state.columnHeightRatios[pos.screenId][pos.spaceId] then
+		local spaceRatios = state.columnHeightRatios[pos.screenId][pos.spaceId]
+		if columnWasRemoved then
+			local maxIdx = 0
+			for k in pairs(spaceRatios) do
+				if k > maxIdx then maxIdx = k end
+			end
+			for i = pos.colIdx, maxIdx do
+				spaceRatios[i] = spaceRatios[i + 1]
+			end
+		else
+			spaceRatios[pos.colIdx] = nil
+		end
+	end
+
+	-- Clean up urgentWindows
+	if state.urgentWindows[winId] then
+		state.urgentWindows[winId] = nil
+		updateMenubar()
+	end
+
+	-- Clean up fullscreenOriginalWidth
+	state.fullscreenOriginalWidth[winId] = nil
+
+	-- Auto-cleanup empty named spaces (preserve numbered spaces 1-4)
+	local isEmptySpace = #space.cols == 0 and (not space.floating or #space.floating == 0)
+	local isNamedSpace = type(pos.spaceId) == "string"
+
+	if isEmptySpace and isNamedSpace then
+		print("[reconcile] Cleaning up empty named space:", pos.spaceId)
+		state.screens[pos.screenId][pos.spaceId] = nil
+		if state.startXForScreenAndSpace[pos.screenId] then
+			state.startXForScreenAndSpace[pos.screenId][pos.spaceId] = nil
+		end
+
+		if state.activeSpaceForScreen[pos.screenId] == pos.spaceId then
+			state.activeSpaceForScreen[pos.screenId] = 1
+			updateMenubar()
+		end
+	end
+
+	return true
+end
+
+-- Add a window to a new column in the given screen/space
+local function addWindowToNewColumn(winId, screenId)
+	local spaceId = state.activeSpaceForScreen[screenId] or 1
+
+	-- Ensure structure exists
 	if not state.screens[screenId] then
 		state.screens[screenId] = {}
 	end
@@ -57,89 +132,242 @@ local function insertWindowAtPosition(winId, screenId, spaceId, colIdx, rowIdx)
 	end
 
 	local cols = state.screens[screenId][spaceId].cols
+	local colIdx = #cols + 1
+	cols[colIdx] = { winId }
 
-	-- If colIdx is beyond current columns, create new column at the end
-	if colIdx > #cols then
-		colIdx = #cols + 1
-		cols[colIdx] = {}
-	end
-
-	-- If rowIdx is specified and valid, insert at that position
-	if rowIdx and rowIdx <= #cols[colIdx] + 1 then
-		table.insert(cols[colIdx], rowIdx, winId)
-	else
-		table.insert(cols[colIdx], winId)
-	end
-
-	return screenId, spaceId, colIdx, rowIdx or #cols[colIdx]
+	return spaceId, colIdx
 end
 
-------------------------------------------
--- Window event handlers
-------------------------------------------
+-- Find a slot that matches this frame (for tab/ID swap handling)
+-- Returns slot info if found, nil otherwise
+local function findSlotByFrame(frame, screenId, app)
+	local tolerance = 10
+	local spaceId = state.activeSpaceForScreen[screenId]
+	local space = state.screens[screenId] and state.screens[screenId][spaceId]
+	if not space then return nil end
 
--- Disable watcher for a specified duration (in seconds)
--- Multiple calls extend the disable period to the latest end time (debouncing)
-function Events.disableWatcherFor(duration)
-	duration = duration or 0.1
-	local newReenableTime = hs.timer.secondsSinceEpoch() + duration
-
-	-- Extend the disable period if this would end later
-	if newReenableTime > watcherReenableAfter then
-		watcherReenableAfter = newReenableTime
-	end
-
-	windowWatcherPaused = true
-end
-
--- Legacy function for backward compatibility
-function Events.pauseWatcher()
-	Events.disableWatcherFor(0.1)
-end
-
--- Legacy function for backward compatibility
--- Sets the re-enable timestamp to now + delay (debounced with any existing disable)
-function Events.resumeWatcher(delay)
-	delay = delay or 0.1
-	local newReenableTime = hs.timer.secondsSinceEpoch() + delay
-
-	-- Extend the disable period if this would end later
-	if newReenableTime > watcherReenableAfter then
-		watcherReenableAfter = newReenableTime
-	end
-end
-
-function Events.isPaused()
-	return windowWatcherPaused
-end
-
--- Start the perpetual timer that monitors and re-enables the watcher
-local function startWatcherMonitor()
-	if watcherMonitorTimer then return end
-
-	watcherMonitorTimer = hs.timer.doEvery(0.05, function()
-		if windowWatcherPaused and hs.timer.secondsSinceEpoch() >= watcherReenableAfter then
-			windowWatcherPaused = false
+	for colIdx, col in ipairs(space.cols) do
+		for rowIdx, winId in ipairs(col) do
+			local win = hs.window(winId)
+			if not win then
+				-- Dead window - this slot is available for replacement
+				return {
+					screenId = screenId,
+					spaceId = spaceId,
+					colIdx = colIdx,
+					rowIdx = rowIdx,
+					deadWindowId = winId
+				}
+			else
+				-- Check if frame matches (same slot, different ID)
+				local otherFrame = win:frame()
+				if math.abs(frame.x - otherFrame.x) <= tolerance
+					and math.abs(frame.y - otherFrame.y) <= tolerance
+					and math.abs(frame.w - otherFrame.w) <= tolerance
+					and math.abs(frame.h - otherFrame.h) <= tolerance then
+					return {
+						screenId = screenId,
+						spaceId = spaceId,
+						colIdx = colIdx,
+						rowIdx = rowIdx,
+						existingWindowId = winId
+					}
+				end
+			end
 		end
+	end
+	return nil
+end
+
+-- Replace a window ID in a slot
+local function replaceWindowInSlot(slot, newWinId)
+	local space = state.screens[slot.screenId][slot.spaceId]
+	if not space then return false end
+
+	local col = space.cols[slot.colIdx]
+	if not col then return false end
+
+	col[slot.rowIdx] = newWinId
+	return true
+end
+
+------------------------------------------
+-- Reconciliation
+------------------------------------------
+
+-- The core reconciliation function: syncs tracked state to actual window reality
+function Events.reconcile()
+	local reconcileStart = hs.timer.secondsSinceEpoch()
+
+	-- Get all actual windows from macOS
+	local allWindows = hs.window.allWindows()
+
+	-- Build set of actual window IDs that should be managed
+	local actualWindows = {}  -- windowId -> {win, screenId, app, frame}
+	for _, win in ipairs(allWindows) do
+		if win:isStandard() and win:isVisible() and not win:isFullScreen() then
+			local screen = win:screen()
+			local app = win:application()
+			if screen and app then
+				actualWindows[win:id()] = {
+					win = win,
+					screenId = screen:id(),
+					app = app:name(),
+					frame = win:frame(),
+				}
+			end
+		end
+	end
+
+	-- Build set of tracked window IDs
+	local trackedWindows = {}  -- windowId -> {screenId, spaceId, colIdx, rowIdx}
+	for screenId, spaces in pairs(state.screens) do
+		for spaceId, space in pairs(spaces) do
+			for colIdx, col in ipairs(space.cols) do
+				for rowIdx, winId in ipairs(col) do
+					trackedWindows[winId] = {
+						screenId = screenId,
+						spaceId = spaceId,
+						colIdx = colIdx,
+						rowIdx = rowIdx,
+					}
+				end
+			end
+		end
+	end
+
+	local removedAny = false
+	local addedAny = false
+
+	-- STEP 1: Remove windows that no longer exist
+	for winId, pos in pairs(trackedWindows) do
+		if not actualWindows[winId] then
+			print("[reconcile] Removing dead window", winId)
+			removeWindowFromState(winId, pos)
+			removedAny = true
+		end
+	end
+
+	-- STEP 2: Add windows that aren't tracked
+	for winId, info in pairs(actualWindows) do
+		if not trackedWindows[winId] then
+			-- Try to match by frame (handles ID swaps from tabs/Chrome)
+			local matchedSlot = findSlotByFrame(info.frame, info.screenId, info.app)
+
+			if matchedSlot and matchedSlot.deadWindowId then
+				-- Found a dead slot with matching frame - replace it
+				print("[reconcile] Replacing dead window", matchedSlot.deadWindowId, "with", winId, "by frame match")
+				replaceWindowInSlot(matchedSlot, winId)
+			elseif matchedSlot and matchedSlot.existingWindowId and matchedSlot.existingWindowId ~= winId then
+				-- Found existing window with same frame - likely tabs, consolidate
+				print("[reconcile] Frame collision: window", winId, "matches frame of", matchedSlot.existingWindowId)
+				-- Add as new row in same column (tabbed windows)
+				local col = state.screens[matchedSlot.screenId][matchedSlot.spaceId].cols[matchedSlot.colIdx]
+				table.insert(col, winId)
+			else
+				-- Genuinely new window
+				print("[reconcile] Adding new window", winId, "app:", info.app)
+				addWindowToNewColumn(winId, info.screenId)
+				addedAny = true
+			end
+		end
+	end
+
+	-- Clean up the window stack
+	cleanWindowStack()
+
+	-- Retile if anything changed
+	if removedAny or addedAny then
+		retileAll()
+	end
+
+	local elapsed = (hs.timer.secondsSinceEpoch() - reconcileStart) * 1000
+	print(string.format("[reconcile] Completed in %.2fms (removed=%s, added=%s)", elapsed, tostring(removedAny), tostring(addedAny)))
+end
+
+-- Debounced reconciliation - waits for events to settle before reconciling
+local function debouncedReconcile(delay)
+	delay = delay or 0.05
+	if reconcileTimer then
+		reconcileTimer:stop()
+	end
+	reconcileTimer = hs.timer.doAfter(delay, function()
+		reconcileTimer = nil
+		Events.reconcile()
 	end)
 end
 
--- Stop the monitor timer
-local function stopWatcherMonitor()
-	if watcherMonitorTimer then
-		watcherMonitorTimer:stop()
-		watcherMonitorTimer = nil
+------------------------------------------
+-- Debounced Focus Tracking
+------------------------------------------
+
+-- Commit focus to window stack after debounce settles
+local function commitFocus()
+	if not pendingFocusWinId then return end
+
+	-- Only commit if this window is still actually focused
+	local current = hs.window.frontmostWindow()
+	if current and current:id() == pendingFocusWinId then
+		print("[focus] Committing focus to stack:", pendingFocusWinId)
+		addToWindowStack(current)
+	else
+		print("[focus] Skipping stale focus:", pendingFocusWinId)
 	end
+	pendingFocusWinId = nil
+end
+
+-- Schedule a focus commit with debouncing
+local function scheduleFocusCommit(winId, delay)
+	if suppressFocusCommit then
+		return
+	end
+
+	delay = delay or 0.1
+	pendingFocusWinId = winId
+
+	if focusCommitTimer then
+		focusCommitTimer:stop()
+	end
+	focusCommitTimer = hs.timer.doAfter(delay, function()
+		focusCommitTimer = nil
+		commitFocus()
+	end)
+end
+
+-- Suppress focus commits temporarily (called before WM actions that manage stack)
+function Events.suppressFocus()
+	suppressFocusCommit = true
+	if focusCommitTimer then
+		focusCommitTimer:stop()
+		focusCommitTimer = nil
+	end
+	pendingFocusWinId = nil
+end
+
+-- Re-enable focus commits (called after WM action completes)
+function Events.resumeFocus()
+	suppressFocusCommit = false
 end
 
 function Events.stop()
-	stopWatcherMonitor()
+	if reconcileTimer then
+		reconcileTimer:stop()
+		reconcileTimer = nil
+	end
+	if focusCommitTimer then
+		focusCommitTimer:stop()
+		focusCommitTimer = nil
+	end
 	if windowWatcher then
 		print("[Events] Stopping window watcher")
 		windowWatcher:unsubscribeAll()
 		windowWatcher = nil
 	end
 end
+
+------------------------------------------
+-- Initialization
+------------------------------------------
 
 function Events.init(wm)
 	local initStart = hs.timer.secondsSinceEpoch()
@@ -176,296 +404,49 @@ function Events.init(wm)
 	profile("window.filter.new()")
 
 	-- Window focused handler
+	-- Uses debounced focus tracking to filter spurious focus events
 	windowWatcher:subscribe(hs.window.filter.windowFocused, function(win, appName, event)
-		if windowWatcherPaused then
-			return
-		end
-		print("[windowFocused]", win:title(), win:id(), windowWatcherPaused)
-		addToWindowStack(win)
-
-		-- Clear urgency for focused window
 		local winId = win:id()
+		print("[windowFocused]", win:title(), winId)
+
+		-- Clear urgency for focused window (immediate)
 		if state.urgentWindows[winId] then
 			clearWindowUrgent(winId)
 		end
 
+		-- Check for space switching (immediate)
 		local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
-
-		-- If window not in state, check if it should replace a missing tabbed window
-		if not screenId or not spaceId or not colIdx or not rowIdx then
-			-- Find a missing window and replace it
-			local replaced = false
-
-			for sid, spaces in pairs(state.screens) do
-				for spid, space in pairs(spaces) do
-					if state.activeSpaceForScreen[sid] == spid then
-						for ci, col in ipairs(space.cols) do
-							for ri, otherWinId in ipairs(col) do
-								local otherWin = hs.window(otherWinId)
-								if not otherWin then
-									print("[windowFocused] Replacing missing window " .. otherWinId .. " with " .. winId .. " in col " .. ci)
-									col[ri] = winId
-									screenId, spaceId, colIdx, rowIdx = sid, spid, ci, ri
-									replaced = true
-									break
-								end
-							end
-							if replaced then break end
-						end
-					end
-					if replaced then break end
-				end
-				if replaced then break end
+		if screenId and spaceId then
+			if state.activeSpaceForScreen[screenId] ~= spaceId then
+				local oldSpaceId = state.activeSpaceForScreen[screenId]
+				state.activeSpaceForScreen[screenId] = spaceId
+				moveSpaceWindowsOffscreen(screenId, oldSpaceId)
+				retile(screenId, spaceId)
+				updateMenubar()
 			end
-
-			if not replaced then
-				-- No missing window to replace - add as new column
-				local screen = win:screen()
-				local sid = screen and screen:id() or hs.screen.mainScreen():id()
-				local spid = state.activeSpaceForScreen[sid] or 1
-
-				screenId, spaceId, colIdx, rowIdx = insertWindowAtPosition(winId, sid, spid, 9999, 1)
-				print("[windowFocused] Added new window " .. winId .. " to col " .. colIdx)
-
-				-- Retile to position the new window
-				retileAll()
-				return
-			end
+			bringIntoView(win)
+		else
+			-- Window not tracked - trigger reconciliation
+			debouncedReconcile()
 		end
 
-		-- Clean up missing windows from this screen/space (handles tabbed windows where one tab "disappears")
-		local cols = state.screens[screenId][spaceId].cols
-		local cleanedUp = false
-		for ci = #cols, 1, -1 do
-			local col = cols[ci]
-			for ri = #col, 1, -1 do
-				local otherWinId = col[ri]
-				if otherWinId ~= winId then
-					local otherWin = hs.window(otherWinId)
-					if not otherWin then
-						print("[windowFocused] Cleaning up missing window " .. otherWinId .. " from col " .. ci)
-						table.remove(col, ri)
-						cleanedUp = true
-					end
-				end
-			end
-			-- Remove empty columns
-			if #col == 0 then
-				table.remove(cols, ci)
-			end
-		end
-
-		-- If we cleaned up windows, re-locate the focused window (column indices may have changed)
-		if cleanedUp then
-			screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
-			if not screenId or not spaceId or not colIdx or not rowIdx then
-				return
-			end
-		end
-
-		-- Check for tabbed windows: if this window's frame matches another window in a different column,
-		-- they are likely tabs sharing the same physical window. Consolidate them.
-		local winFrame = win:frame()
-		local consolidatedWithCol = nil
-
-		for otherColIdx, col in ipairs(cols) do
-			if otherColIdx ~= colIdx then
-				for _, otherWinId in ipairs(col) do
-					local otherWin = Windows.getWindow(otherWinId)
-					if otherWin then
-						local otherFrame = otherWin:frame()
-						-- Check if frames match (within tolerance) - indicates tabbed windows
-						local frameTolerance = 5
-						if math.abs(winFrame.x - otherFrame.x) <= frameTolerance
-							and math.abs(winFrame.y - otherFrame.y) <= frameTolerance
-							and math.abs(winFrame.w - otherFrame.w) <= frameTolerance
-							and math.abs(winFrame.h - otherFrame.h) <= frameTolerance then
-							consolidatedWithCol = otherColIdx
-							break
-						end
-					end
-				end
-			end
-			if consolidatedWithCol then break end
-		end
-
-		if consolidatedWithCol then
-			-- Consolidate: move focused window to the other column, remove old entry
-			print("[windowFocused] Consolidating tabbed window " .. winId .. " from col " .. colIdx .. " to col " .. consolidatedWithCol)
-
-			-- Remove from old column
-			local oldCol = cols[colIdx]
-			for i = #oldCol, 1, -1 do
-				if oldCol[i] == winId then
-					table.remove(oldCol, i)
-					break
-				end
-			end
-
-			-- If old column is now empty, remove it
-			if #oldCol == 0 then
-				table.remove(cols, colIdx)
-			end
-
-			-- Add to the consolidated column (at the end, as a row)
-			local targetCol = cols[consolidatedWithCol > colIdx and consolidatedWithCol - 1 or consolidatedWithCol]
-			table.insert(targetCol, winId)
-
-			-- Retile to fix positions, but don't call bringIntoView since we're already in the right spot
-			retile(screenId, spaceId)
-			return
-		end
-
-		-- If we cleaned up windows, retile to fix positions and skip bringIntoView
-		-- since the window is likely already in the correct position
-		if cleanedUp then
-			retile(screenId, spaceId)
-			return
-		end
-
-		if state.activeSpaceForScreen[screenId] ~= spaceId then
-			local oldSpaceId = state.activeSpaceForScreen[screenId]
-			state.activeSpaceForScreen[screenId] = spaceId
-			-- Only retile the affected screen's spaces
-			moveSpaceWindowsOffscreen(screenId, oldSpaceId)
-			retile(screenId, spaceId)
-
-			-- Update menubar to reflect space change
-			updateMenubar()
-		end
-		bringIntoView(win)
+		-- Schedule debounced focus commit to window stack
+		-- This filters out rapid focus changes during create/destroy cycles
+		scheduleFocusCommit(winId)
 	end)
 	profile("subscribe windowFocused")
 
-	-- Window created handler
+	-- Window created handler - just trigger reconciliation
 	windowWatcher:subscribe(hs.window.filter.windowCreated, function(win, appName, event)
-		if windowWatcherPaused then
-			return
-		end
-		if not win:isStandard() or not win:isVisible() or win:isFullScreen() then
-			return
-		end
 		print("[windowCreated]", win:title(), win:id())
-
-		-- If the window is already on a screen, don't do anything
-		local screenId, spaceId, colIdx, rowIdx = locateWindow(win:id())
-		if screenId ~= nil then
-			return
-		end
-
-		-- Place new window in the current space/column
-		local screen = win:screen()
-		local screenId = screen and screen:id() or hs.screen.mainScreen():id()
-		local spaceId = state.activeSpaceForScreen[screenId] or 1
-
-		-- Place in a new column at the end
-		local cols = state.screens[screenId][spaceId].cols
-		local colIdx = #cols + 1
-		cols[colIdx] = cols[colIdx] or {}
-		table.insert(cols[colIdx], win:id())
-
-		addToWindowStack(win)
-		cleanWindowStack()
-		retileAll()
+		debouncedReconcile()
 	end)
 	profile("subscribe windowCreated")
 
-	-- Window destroyed handler
+	-- Window destroyed handler - just trigger reconciliation
 	windowWatcher:subscribe(hs.window.filter.windowDestroyed, function(win, appName, event)
-		if windowWatcherPaused then
-			return
-		end
 		print("[windowDestroyed]", win:title(), win:id())
-
-		local winId = win:id()
-
-		-- Clean up urgentWindows unconditionally (before early return)
-		if state.urgentWindows[winId] then
-			state.urgentWindows[winId] = nil
-			updateMenubar()
-		end
-
-		-- Clean up fullscreenOriginalWidth unconditionally (before early return)
-		state.fullscreenOriginalWidth[winId] = nil
-
-		local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
-		if not screenId or not spaceId or not colIdx or not rowIdx then
-			return
-		end
-
-		-- Save position info before removal
-		local savedScreenId, savedSpaceId, savedColIdx, savedRowIdx = screenId, spaceId, colIdx, rowIdx
-
-		local col = state.screens[screenId][spaceId].cols[colIdx]
-		if not col then
-			return
-		end
-		for i = #col, 1, -1 do
-			if col[i] == winId then
-				table.remove(col, i)
-				break
-			end
-		end
-		local columnWasRemoved = false
-		if #col == 0 then
-			table.remove(state.screens[screenId][spaceId].cols, colIdx)
-			columnWasRemoved = true
-		end
-
-		-- Clear height ratios for affected column
-		if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][spaceId] then
-			local spaceRatios = state.columnHeightRatios[screenId][spaceId]
-			if columnWasRemoved then
-				-- Shift ratios for columns after the removed one
-				local maxIdx = 0
-				for k in pairs(spaceRatios) do
-					if k > maxIdx then maxIdx = k end
-				end
-				for i = colIdx, maxIdx do
-					spaceRatios[i] = spaceRatios[i + 1]
-				end
-			else
-				-- Just clear the affected column
-				spaceRatios[colIdx] = nil
-			end
-		end
-
-		-- Auto-cleanup empty named spaces (but preserve numbered spaces 1-4)
-		local space = state.screens[screenId][spaceId]
-		local isEmptySpace = space and #space.cols == 0 and (not space.floating or #space.floating == 0)
-		local isNamedSpace = type(spaceId) == "string"
-
-		if isEmptySpace and isNamedSpace then
-			print("[windowDestroyed]", "Cleaning up empty named space:", spaceId)
-			state.screens[screenId][spaceId] = nil
-			state.startXForScreenAndSpace[screenId][spaceId] = nil
-
-			-- If this was the active space, switch to space 1
-			if state.activeSpaceForScreen[screenId] == spaceId then
-				state.activeSpaceForScreen[screenId] = 1
-				updateMenubar()
-			end
-		end
-
-		-- Clean up the window stack to remove any now-invalid windows
-		cleanWindowStack()
-
-		-- Check if focused window is untracked - if so, place it at the destroyed window's position
-		local newFocused = hs.window.focusedWindow()
-		if newFocused then
-			local newWinId = newFocused:id()
-			local existingScreenId = locateWindow(newWinId)
-			if not existingScreenId then
-				local targetColIdx = columnWasRemoved and savedColIdx or savedColIdx
-				local targetRowIdx = columnWasRemoved and 1 or savedRowIdx
-				print(string.format("[windowDestroyed] Placing untracked window %d at col %d", newWinId, targetColIdx))
-				insertWindowAtPosition(newWinId, savedScreenId, savedSpaceId, targetColIdx, targetRowIdx)
-				addToWindowStack(newFocused)
-			end
-		end
-
-		-- Retile all screens/spaces
-		retileAll()
+		debouncedReconcile()
 	end)
 	profile("subscribe windowDestroyed")
 
@@ -473,17 +454,10 @@ function Events.init(wm)
 	windowWatcher:subscribe(
 		{ hs.window.filter.windowFullscreened, hs.window.filter.windowUnfullscreened },
 		function(win, appName, event)
-			if windowWatcherPaused then
-				return
-			end
-			retileAll()
+			debouncedReconcile()
 		end
 	)
 	profile("subscribe fullscreen")
-
-	-- Start the monitor timer that re-enables the watcher after disable periods
-	startWatcherMonitor()
-	profile("start watcher monitor")
 
 	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
 	print(string.format("[Events] Module initialized - TOTAL: %.2fms", totalTime))
