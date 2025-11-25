@@ -171,7 +171,9 @@ function Windows.locateWindow(windowId)
 	return foundScreenId, foundSpaceId, foundColIdx, foundRowIdx
 end
 
--- Update z-order of windows based on focus
+-- Update z-order of windows using coverflow-style algorithm.
+-- Only raises windows when they overlap with a window farther from focus
+-- that is incorrectly in front. This minimizes unnecessary raise() calls.
 function Windows.updateZOrder(cols, focusedWindowId)
 	if not cols or #cols == 0 or not focusedWindowId then
 		return
@@ -182,113 +184,90 @@ function Windows.updateZOrder(cols, focusedWindowId)
 		return
 	end
 
-	-- Get screen frame from focused window to calculate visibility
-	local focusedWin = Windows.getWindow(focusedWindowId)
-	if not focusedWin then
-		return
-	end
-	local screen = focusedWin:screen()
-	if not screen then
-		return
-	end
-	local screenFrame = screen:frame()
-
-	-- Helper to check if a window is visible (>50% on screen)
-	local function isWindowVisible(winId)
-		local win = Windows.getWindow(winId)
-		if not win then
-			return false
-		end
-		local frame = win:frame()
-		local winLeft = frame.x
-		local winRight = frame.x + frame.w
-		local screenLeft = screenFrame.x
-		local screenRight = screenFrame.x + screenFrame.w
-
-		local visibleLeft = math.max(winLeft, screenLeft)
-		local visibleRight = math.min(winRight, screenRight)
-		local visibleWidth = math.max(0, visibleRight - visibleLeft)
-		local percentVisible = visibleWidth / frame.w
-
-		return percentVisible > 0.50
-	end
-
-	-- Build desired front-to-back order (only visible windows)
-	local ordered = {}
-
-	-- Helper to append visible windows from a column (optionally skipping one)
-	local function appendColumn(colIdx, skipId)
-		local col = cols[colIdx]
-		if not col then
-			return
-		end
-		for _, id in ipairs(col) do
-			if id ~= skipId and isWindowVisible(id) then
-				table.insert(ordered, id)
+	-- Build a flat list of window info for all tiled windows
+	local allWindows = {}
+	for colIdx, col in ipairs(cols) do
+		for _, winId in ipairs(col) do
+			local win = Windows.getWindow(winId)
+			if win then
+				table.insert(allWindows, {
+					id = winId,
+					colIdx = colIdx,
+					frame = win:frame(),
+					win = win,
+				})
 			end
 		end
 	end
 
-	-- 1. Focused window (always include if visible)
-	if isWindowVisible(focusedWindowId) then
-		table.insert(ordered, focusedWindowId)
+	if #allWindows == 0 then
+		return
 	end
 
-	-- 2. Other rows in the same column
-	appendColumn(focusedColIdx, focusedWindowId)
-
-	-- 3. Columns farther from focus: left-1, right-1, left-2, right-2, …
-	local offset = 1
-	local maxOffset = #cols
-	while offset <= maxOffset do
-		local leftIdx = focusedColIdx - offset
-		local rightIdx = focusedColIdx + offset
-		if leftIdx >= 1 then
-			appendColumn(leftIdx)
-		end
-		if rightIdx <= #cols then
-			appendColumn(rightIdx)
-		end
-		offset = offset + 1
+	-- Helper: check if two frames overlap horizontally
+	local function framesOverlap(f1, f2)
+		return f1.x < (f2.x + f2.w) and (f1.x + f1.w) > f2.x
 	end
 
-	-- Current z-order for our tiled windows (front-to-back)
-	local currentPos = {}
+	-- Column distance from focus (0 = focused column)
+	local function colDistance(colIdx)
+		return math.abs(colIdx - focusedColIdx)
+	end
+
+	-- Get current z-order positions (lower = more in front)
+	local currentZPos = {}
 	do
-		local wanted = {}
-		for _, id in ipairs(ordered) do
-			wanted[id] = true
-		end
-
 		local idx = 1
 		for _, w in ipairs(hs.window.orderedWindows()) do
-			local id = w:id()
-			if wanted[id] then
-				currentPos[id] = idx
-				idx = idx + 1
+			currentZPos[w:id()] = idx
+			idx = idx + 1
+		end
+	end
+
+	-- Find windows that need raising:
+	-- A window needs raising if there exists an overlapping window
+	-- that is farther from focus but currently in front of it
+	local needsRaise = {}
+
+	for i, winA in ipairs(allWindows) do
+		local distA = colDistance(winA.colIdx)
+		local posA = currentZPos[winA.id] or math.huge
+
+		for j, winB in ipairs(allWindows) do
+			if i ~= j and framesOverlap(winA.frame, winB.frame) then
+				local distB = colDistance(winB.colIdx)
+				local posB = currentZPos[winB.id] or math.huge
+
+				-- If A should be in front (closer to focus) but B is currently in front
+				if distA < distB and posA > posB then
+					needsRaise[winA.id] = {
+						win = winA.win,
+						dist = distA,
+					}
+				end
+				-- Tie-breaker: same distance, prefer left column (lower colIdx)
+				if distA == distB and winA.colIdx < winB.colIdx and posA > posB then
+					needsRaise[winA.id] = {
+						win = winA.win,
+						dist = distA,
+					}
+				end
 			end
 		end
 	end
 
-	-- Walk desired order back→front, raising only when needed
-	local minFront = math.huge -- frontmost index seen so far
-	for i = #ordered, 1, -1 do
-		local id = ordered[i]
-		local pos = currentPos[id] or math.huge
+	-- Raise windows that need it, from farthest to closest
+	-- (so closer windows end up on top after all raises complete)
+	local toRaise = {}
+	for id, info in pairs(needsRaise) do
+		table.insert(toRaise, { id = id, win = info.win, dist = info.dist })
+	end
+	table.sort(toRaise, function(a, b)
+		return a.dist > b.dist
+	end)
 
-		-- If this window is currently *behind* something that should be
-		-- behind it, lift it; otherwise leave it where it is.
-		if pos > minFront then
-			local w = Windows.getWindow(id)
-			if w then
-				w:raise()
-			end
-			minFront = 0 -- now frontmost
-		else
-			if pos < minFront then
-				minFront = pos
-			end
-		end
+	for _, item in ipairs(toRaise) do
+		item.win:raise()
 	end
 end
 
