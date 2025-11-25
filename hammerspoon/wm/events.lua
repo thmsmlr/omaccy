@@ -46,19 +46,43 @@ local suppressFocusCommit = false -- flag to suppress focus commits during WM op
 ------------------------------------------
 
 -- Remove a window from state given its position
+-- Enhanced with position validation to catch state corruption early
 local function removeWindowFromState(winId, pos)
 	local space = state.screens[pos.screenId] and state.screens[pos.screenId][pos.spaceId]
-	if not space then return false end
+	if not space then
+		print(string.format("[removeWindowFromState] WARN: space doesn't exist: screen=%s, space=%s",
+			tostring(pos.screenId), tostring(pos.spaceId)))
+		return false
+	end
 
 	local col = space.cols[pos.colIdx]
-	if not col then return false end
+	if not col then
+		print(string.format("[removeWindowFromState] WARN: column doesn't exist: colIdx=%d",
+			pos.colIdx))
+		return false
+	end
 
-	-- Remove window from column
+	-- Validate window is at expected position
+	local foundAtExpected = (col[pos.rowIdx] == winId)
+	if not foundAtExpected then
+		print(string.format("[removeWindowFromState] WARN: window %d not at expected position (col=%d, row=%d), searching...",
+			winId, pos.colIdx, pos.rowIdx))
+	end
+
+	-- Remove window from column (search in case position was stale)
+	local removed = false
 	for i = #col, 1, -1 do
 		if col[i] == winId then
 			table.remove(col, i)
+			removed = true
 			break
 		end
+	end
+
+	if not removed then
+		print(string.format("[removeWindowFromState] WARN: window %d not found in column %d",
+			winId, pos.colIdx))
+		return false
 	end
 
 	-- Track if column was removed for ratio shifting
@@ -138,44 +162,118 @@ local function addWindowToNewColumn(winId, screenId)
 	return spaceId, colIdx
 end
 
--- Find a slot that matches this frame (for tab/ID swap handling)
--- Returns slot info if found, nil otherwise
+-- Check if two frames match within tolerance
+local function framesMatch(f1, f2, tolerance)
+	tolerance = tolerance or 10
+	return math.abs(f1.x - f2.x) <= tolerance
+		and math.abs(f1.y - f2.y) <= tolerance
+		and math.abs(f1.w - f2.w) <= tolerance
+		and math.abs(f1.h - f2.h) <= tolerance
+end
+
+-- Find a slot that matches this frame across ALL spaces (not just active)
+-- This is critical for handling Chrome tab operations and window ID swaps
+-- that happen on non-active spaces.
+--
+-- Search order (prioritized):
+--   1. Dead slots with matching frame on SAME screen (any space) - ID swap on same screen
+--   2. Dead slots with matching frame on OTHER screens - ID swap across screens
+--   3. Existing windows with matching frame on SAME screen - tabbed/stacked windows
+--   4. Existing windows with matching frame on OTHER screens - cross-screen tabs
+--
+-- Returns: {screenId, spaceId, colIdx, rowIdx, deadWindowId?, existingWindowId?, matchType}
+--          or nil if no match found
 local function findSlotByFrame(frame, screenId, app)
 	local tolerance = 10
-	local spaceId = state.activeSpaceForScreen[screenId]
-	local space = state.screens[screenId] and state.screens[screenId][spaceId]
-	if not space then return nil end
+	local deadSlots = {}      -- Collect dead slots with matching frames
+	local existingSlots = {}  -- Collect existing windows with matching frames
 
-	for colIdx, col in ipairs(space.cols) do
-		for rowIdx, winId in ipairs(col) do
-			local win = hs.window(winId)
-			if not win then
-				-- Dead window - this slot is available for replacement
-				return {
-					screenId = screenId,
-					spaceId = spaceId,
-					colIdx = colIdx,
-					rowIdx = rowIdx,
-					deadWindowId = winId
-				}
-			else
-				-- Check if frame matches (same slot, different ID)
-				local otherFrame = win:frame()
-				if math.abs(frame.x - otherFrame.x) <= tolerance
-					and math.abs(frame.y - otherFrame.y) <= tolerance
-					and math.abs(frame.w - otherFrame.w) <= tolerance
-					and math.abs(frame.h - otherFrame.h) <= tolerance then
-					return {
-						screenId = screenId,
-						spaceId = spaceId,
-						colIdx = colIdx,
-						rowIdx = rowIdx,
-						existingWindowId = winId
-					}
+	-- Search all screens and spaces
+	for checkScreenId, spaces in pairs(state.screens) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				for colIdx, col in ipairs(space.cols) do
+					for rowIdx, winId in ipairs(col) do
+						local win = hs.window(winId)
+						if not win then
+							-- Dead window slot - check if frame would match
+							-- We can't get frame of dead window, but we track it as available
+							-- Priority: same screen > other screens
+							table.insert(deadSlots, {
+								screenId = checkScreenId,
+								spaceId = spaceId,
+								colIdx = colIdx,
+								rowIdx = rowIdx,
+								deadWindowId = winId,
+								sameScreen = (checkScreenId == screenId),
+							})
+						else
+							-- Live window - check frame match
+							local otherFrame = win:frame()
+							if framesMatch(frame, otherFrame, tolerance) then
+								table.insert(existingSlots, {
+									screenId = checkScreenId,
+									spaceId = spaceId,
+									colIdx = colIdx,
+									rowIdx = rowIdx,
+									existingWindowId = winId,
+									sameScreen = (checkScreenId == screenId),
+								})
+							end
+						end
+					end
 				end
 			end
 		end
 	end
+
+	-- Debug logging: show what we found
+	if #deadSlots > 0 or #existingSlots > 0 then
+		print(string.format("[findSlotByFrame] Looking for frame (%.0f,%.0f,%.0f,%.0f) on screen %s for %s",
+			frame.x, frame.y, frame.w, frame.h, tostring(screenId), app or "unknown"))
+		print(string.format("[findSlotByFrame] Found %d dead slots, %d existing matches", #deadSlots, #existingSlots))
+		for i, slot in ipairs(deadSlots) do
+			print(string.format("[findSlotByFrame]   dead[%d]: winId=%d space=%s sameScreen=%s",
+				i, slot.deadWindowId, tostring(slot.spaceId), tostring(slot.sameScreen)))
+		end
+	end
+
+	-- Priority 1: Dead slot on same screen (most likely ID swap scenario)
+	for _, slot in ipairs(deadSlots) do
+		if slot.sameScreen then
+			slot.matchType = "deadSameScreen"
+			return slot
+		end
+	end
+
+	-- Priority 2: Dead slot on other screen
+	for _, slot in ipairs(deadSlots) do
+		if not slot.sameScreen then
+			slot.matchType = "deadOtherScreen"
+			return slot
+		end
+	end
+
+	-- Priority 3: Existing window with matching frame on same screen (tabbed)
+	for _, slot in ipairs(existingSlots) do
+		if slot.sameScreen then
+			slot.matchType = "tabbedSameScreen"
+			return slot
+		end
+	end
+
+	-- Priority 4: Existing window with matching frame on other screen
+	for _, slot in ipairs(existingSlots) do
+		if not slot.sameScreen then
+			slot.matchType = "tabbedOtherScreen"
+			return slot
+		end
+	end
+
+	-- No match found - log this for debugging
+	print(string.format("[findSlotByFrame] No match found for frame (%.0f,%.0f,%.0f,%.0f) screen=%s app=%s (searched %d dead, %d existing)",
+		frame.x, frame.y, frame.w, frame.h, tostring(screenId), app or "unknown", #deadSlots, #existingSlots))
+
 	return nil
 end
 
@@ -236,37 +334,85 @@ function Events.reconcile()
 		end
 	end
 
+	-- Build set of window IDs that exist at window server level (CGWindowList)
+	-- This is independent of the Accessibility API and sees ALL windows,
+	-- even those temporarily inaccessible due to modal dialogs or AXUnknown state
+	local windowServerIds = {}  -- windowId -> appName
+	for _, cgWin in ipairs(hs.window.list() or {}) do
+		if cgWin.kCGWindowIsOnscreen then
+			windowServerIds[cgWin.kCGWindowNumber] = cgWin.kCGWindowOwnerName
+		end
+	end
+
 	local removedAny = false
 	local addedAny = false
 
 	-- STEP 1: Remove windows that no longer exist
+	-- IMPORTANT: Verify windows are truly gone using CGWindowList, not just inaccessible to AX API
+	-- This prevents removing windows that are temporarily blocked by modal dialogs
+	local removedWindows = {}  -- Track what we're removing for logging
+	local skippedWindows = {}  -- Track windows we're NOT removing (still in window server)
 	for winId, pos in pairs(trackedWindows) do
 		if not actualWindows[winId] then
-			print("[reconcile] Removing dead window", winId)
-			removeWindowFromState(winId, pos)
-			removedAny = true
+			-- Window not accessible via Accessibility API
+			if windowServerIds[winId] then
+				-- BUT it still exists at window server level!
+				-- This means it's temporarily inaccessible (modal dialog, AXUnknown, etc.)
+				skippedWindows[winId] = windowServerIds[winId]
+			else
+				-- Gone from BOTH APIs - truly destroyed, safe to remove
+				print(string.format("[reconcile] Removing dead window %d from space=%s col=%d row=%d",
+					winId, tostring(pos.spaceId), pos.colIdx, pos.rowIdx))
+				removedWindows[winId] = pos
+				removeWindowFromState(winId, pos)
+				removedAny = true
+			end
 		end
 	end
 
+	-- Log skipped windows (temporarily inaccessible)
+	local skippedCount = 0
+	for _ in pairs(skippedWindows) do skippedCount = skippedCount + 1 end
+	if skippedCount > 0 then
+		print(string.format("[reconcile] Skipped %d windows (inaccessible to AX but exist in window server):", skippedCount))
+		for winId, appName in pairs(skippedWindows) do
+			print(string.format("[reconcile]   - window %d (%s)", winId, appName or "unknown"))
+		end
+	end
+
+	-- Log summary of removals
+	if removedAny then
+		local count = 0
+		for _ in pairs(removedWindows) do count = count + 1 end
+		print(string.format("[reconcile] Removed %d windows total", count))
+	end
+
 	-- STEP 2: Add windows that aren't tracked
+	-- KEY PRINCIPLE: Trust window IDs as canonical. Only use frame-matching for genuine ID swaps.
 	for winId, info in pairs(actualWindows) do
 		if not trackedWindows[winId] then
-			-- Try to match by frame (handles ID swaps from tabs/Chrome)
+			-- Window ID not in state - try to match by frame (handles ID swaps from tabs/Chrome)
+			-- Now searches ALL spaces, not just active space
 			local matchedSlot = findSlotByFrame(info.frame, info.screenId, info.app)
 
 			if matchedSlot and matchedSlot.deadWindowId then
-				-- Found a dead slot with matching frame - replace it
-				print("[reconcile] Replacing dead window", matchedSlot.deadWindowId, "with", winId, "by frame match")
+				-- Found a dead slot - this is likely an ID swap (tab detach, window reload, etc.)
+				-- The new window replaces the dead one in its ORIGINAL position (preserves space assignment)
+				print(string.format("[reconcile] ID swap: replacing dead %d with %d (space=%s, match=%s)",
+					matchedSlot.deadWindowId, winId, tostring(matchedSlot.spaceId), matchedSlot.matchType))
 				replaceWindowInSlot(matchedSlot, winId)
+				addedAny = true
 			elseif matchedSlot and matchedSlot.existingWindowId and matchedSlot.existingWindowId ~= winId then
-				-- Found existing window with same frame - likely tabs, consolidate
-				print("[reconcile] Frame collision: window", winId, "matches frame of", matchedSlot.existingWindowId)
-				-- Add as new row in same column (tabbed windows)
+				-- Found existing window with same frame - likely tabbed/stacked windows
+				print(string.format("[reconcile] Tabbed: window %d matches frame of %d (space=%s, match=%s)",
+					winId, matchedSlot.existingWindowId, tostring(matchedSlot.spaceId), matchedSlot.matchType))
+				-- Add as new row in same column
 				local col = state.screens[matchedSlot.screenId][matchedSlot.spaceId].cols[matchedSlot.colIdx]
 				table.insert(col, winId)
+				addedAny = true
 			else
-				-- Genuinely new window
-				print("[reconcile] Adding new window", winId, "app:", info.app)
+				-- Genuinely new window - add to active space
+				print("[reconcile] New window", winId, "app:", info.app)
 				addWindowToNewColumn(winId, info.screenId)
 				addedAny = true
 			end

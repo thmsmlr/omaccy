@@ -65,11 +65,21 @@ function Windows.getWindow(winId)
 end
 
 -- Removes invalid or closed windows from the window stack
+-- Uses CGWindowList for fast verification instead of expensive Accessibility API calls
 function Windows.cleanWindowStack()
+	-- Build set of valid window IDs from CGWindowList (fast, no AX API)
+	-- This avoids removing windows that are temporarily inaccessible due to modal dialogs
+	local validWindowIds = {}
+	for _, cgWin in ipairs(hs.window.list() or {}) do
+		if cgWin.kCGWindowIsOnscreen then
+			validWindowIds[cgWin.kCGWindowNumber] = true
+		end
+	end
+
 	for i = #state.windowStack, 1, -1 do
 		local id = state.windowStack[i]
-		local win = _windows[id] or Window(id)
-		if not win or not win:isStandard() or not win:isVisible() then
+		if not validWindowIds[id] then
+			-- Window no longer exists at window server level - truly gone
 			table.remove(state.windowStack, i)
 		end
 	end

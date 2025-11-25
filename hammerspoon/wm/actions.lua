@@ -136,9 +136,19 @@ function Actions.focusDirection(direction)
 
 	local cols = state.screens[currentScreenId][currentSpace].cols
 
-	-- Helper to check if a window exists
+	-- Build set of valid window IDs from CGWindowList (cached for this function call)
+	-- This is much faster than calling hs.window(winId) repeatedly in the loop below,
+	-- and avoids issues with windows temporarily inaccessible due to modal dialogs
+	local validWindowIds = {}
+	for _, cgWin in ipairs(hs.window.list() or {}) do
+		if cgWin.kCGWindowIsOnscreen then
+			validWindowIds[cgWin.kCGWindowNumber] = true
+		end
+	end
+
+	-- Helper to check if a window exists (uses cached CGWindowList)
 	local function windowExists(winId)
-		return hs.window(winId) ~= nil
+		return validWindowIds[winId] == true
 	end
 
 	if direction == "left" or direction == "right" then

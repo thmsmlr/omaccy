@@ -223,7 +223,7 @@ end
 
 applicationHotkey("t", "Ghostty", "open -njga '/Applications/Ghostty.app'", { launchViaMenu = true })
 applicationHotkey("b", "Google Chrome", "/Users/thomas/.local/bin/chrome", { launchViaMenu = true })
-applicationHotkey("e", "Cursor", "open -njga '/Applications/Cursor.app'", { launchViaMenu = true })
+applicationHotkey("e", "Code", "open -a '/Applications/Visual Studio Code.app'", { launchViaMenu = true })
 applicationHotkey("s", "Slack", "open -a '/Applications/Slack.app'", { singleton = true })
 applicationHotkey("n", "Notes", "open -a '/System/Applications/Notes.app'", { singleton = true })
 applicationHotkey("x", "X", 'open -na "/Users/thomas/Applications/Chrome Apps.localized/X.app"', { singleton = true })

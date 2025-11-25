@@ -35,9 +35,11 @@ hammerspoon/
 ## Development Workflow
 
 1. Edit Lua files in `hammerspoon/`
-2. Reload with `hs -c 'WM:saveState(); hs.reload()'`
+2. **Always reload after changes**: `hs -c 'WM:saveState(); hs.reload()'`
 3. Wait ~2s for reload to complete
 4. Test changes
+
+**Important**: Claude should automatically reload the config after making any changes to Lua files.
 
 ## Profiling
 
@@ -53,3 +55,19 @@ print(string.format("%.2fms", (hs.timer.secondsSinceEpoch() - start) * 1000))
 - The `WM` global is exposed for external script access via `hs.ipc`
 - Hotkey conventions: `CMD+CTRL` for focus, `CMD+SHIFT+CTRL` for moving/modifying windows
 - never run `hs.reload` in the same bash command as another `hs` command, it hangs. Always run them as separate Bash tool calls.
+
+## Window Validation: CGWindowList vs Accessibility API
+
+When checking if a window exists, prefer `hs.window.list()` (CGWindowList) over `hs.window(id)` (Accessibility API):
+
+```lua
+-- Build valid window set from CGWindowList
+local validIds = {}
+for _, cgWin in ipairs(hs.window.list() or {}) do
+    if cgWin.kCGWindowIsOnscreen then
+        validIds[cgWin.kCGWindowNumber] = true
+    end
+end
+```
+
+**Why:** Chrome (and other apps) can make windows temporarily inaccessible to the Accessibility API during modal dialogs (e.g., "Leave site?" confirmations). CGWindowList queries the window server directly and still sees these windows. Without this check, the WM would incorrectly remove windows from state and lose their positions.

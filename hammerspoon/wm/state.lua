@@ -143,9 +143,21 @@ function State.load()
 end
 
 -- Clean invalid window IDs from saved state structure
--- validIds: set of currently valid window IDs
+-- validIds: set of currently valid window IDs (from Accessibility API)
+-- Uses CGWindowList as a secondary check to avoid removing windows that are
+-- temporarily inaccessible (e.g., due to modal dialogs)
 function State.cleanSavedStateWindows(savedState, validIds)
+	-- Build set of window IDs that exist at window server level (CGWindowList)
+	-- This catches windows that are temporarily inaccessible to the Accessibility API
+	local windowServerIds = {}
+	for _, cgWin in ipairs(hs.window.list() or {}) do
+		if cgWin.kCGWindowIsOnscreen then
+			windowServerIds[cgWin.kCGWindowNumber] = cgWin.kCGWindowOwnerName
+		end
+	end
+
 	local deadWindows = {}
+	local skippedWindows = {}
 	for screenId, spaces in pairs(savedState.screens or {}) do
 		for spaceId, space in pairs(spaces) do
 			if space.cols then
@@ -153,13 +165,26 @@ function State.cleanSavedStateWindows(savedState, validIds)
 				for colIdx = #space.cols, 1, -1 do
 					local col = space.cols[colIdx]
 					for rowIdx = #col, 1, -1 do
-						if not validIds[col[rowIdx]] then
-							table.insert(deadWindows, {
-								winId = col[rowIdx],
-								spaceId = spaceId,
-								screenId = screenId
-							})
-							table.remove(col, rowIdx)
+						local winId = col[rowIdx]
+						if not validIds[winId] then
+							-- Window not accessible via AX API
+							if windowServerIds[winId] then
+								-- BUT it still exists at window server level - don't remove
+								table.insert(skippedWindows, {
+									winId = winId,
+									spaceId = spaceId,
+									screenId = screenId,
+									appName = windowServerIds[winId]
+								})
+							else
+								-- Gone from BOTH APIs - truly dead, safe to remove
+								table.insert(deadWindows, {
+									winId = winId,
+									spaceId = spaceId,
+									screenId = screenId
+								})
+								table.remove(col, rowIdx)
+							end
 						end
 					end
 					-- Remove empty columns
@@ -171,8 +196,15 @@ function State.cleanSavedStateWindows(savedState, validIds)
 		end
 	end
 
+	if #skippedWindows > 0 then
+		print("[State] Skipped " .. #skippedWindows .. " windows (inaccessible to AX but exist in window server):")
+		for _, info in ipairs(skippedWindows) do
+			print("  - Window ID " .. info.winId .. " (" .. (info.appName or "unknown") .. ") in space '" .. tostring(info.spaceId) .. "'")
+		end
+	end
+
 	if #deadWindows > 0 then
-		print("[State] Found " .. #deadWindows .. " dead windows in saved state, will clean them up:")
+		print("[State] Found " .. #deadWindows .. " dead windows in saved state, cleaning up:")
 		for _, info in ipairs(deadWindows) do
 			print("  - Window ID " .. info.winId .. " in space '" .. tostring(info.spaceId) .. "' on screen " .. info.screenId)
 		end
