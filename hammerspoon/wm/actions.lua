@@ -70,15 +70,18 @@ function Actions.navigateStack(direction)
 	end
 	local winId = state.windowStack[state.windowStackIndex]
 	if not winId then
+		Events.resumeFocus()
 		return
 	end
 	local win = getWindow(winId)
 	if not win then
+		Events.resumeFocus()
 		return
 	end
 
 	local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
 	if not screenId or not spaceId then
+		Events.resumeFocus()
 		return
 	end
 	local currentSpaceId = state.activeSpaceForScreen[screenId]

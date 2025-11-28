@@ -76,13 +76,24 @@ function Windows.cleanWindowStack()
 		end
 	end
 
+	-- Track how many windows are removed BEFORE the current index
+	-- so we can adjust the index to keep pointing at the same window
+	local removedBeforeIndex = 0
+
 	for i = #state.windowStack, 1, -1 do
 		local id = state.windowStack[i]
 		if not validWindowIds[id] then
 			-- Window no longer exists at window server level - truly gone
+			if i < state.windowStackIndex then
+				removedBeforeIndex = removedBeforeIndex + 1
+			end
 			table.remove(state.windowStack, i)
 		end
 	end
+
+	-- Adjust index for windows removed before it
+	state.windowStackIndex = state.windowStackIndex - removedBeforeIndex
+
 	-- Clamp the active index to the valid range
 	if state.windowStackIndex > #state.windowStack then
 		state.windowStackIndex = #state.windowStack
@@ -93,9 +104,15 @@ function Windows.cleanWindowStack()
 end
 
 -- Focus a window with retry logic
+-- IMPORTANT: callback is ALWAYS called, even if focus fails after max retries
 function Windows.focusWindow(w, callback)
 	local function waitForFocus(attempts)
 		if attempts == 0 then
+			-- Failed to focus after all attempts - still call callback
+			print("[focusWindow] Failed to focus window after max retries, calling callback anyway")
+			if callback then
+				callback()
+			end
 			return
 		end
 		local app = w:application()

@@ -40,6 +40,7 @@ local reconcileTimer = nil      -- debounce timer for reconciliation
 local focusCommitTimer = nil    -- debounce timer for focus tracking
 local pendingFocusWinId = nil   -- pending focus to commit after settling
 local suppressFocusCommit = false -- flag to suppress focus commits during WM operations
+local suppressFocusHandler = false -- flag to suppress entire focus handler during navigation
 
 ------------------------------------------
 -- Helper functions
@@ -277,7 +278,7 @@ local function findSlotByFrame(frame, screenId, app)
 	return nil
 end
 
--- Replace a window ID in a slot
+-- Replace a window ID in a slot (also updates windowStack to preserve history)
 local function replaceWindowInSlot(slot, newWinId)
 	local space = state.screens[slot.screenId][slot.spaceId]
 	if not space then return false end
@@ -285,7 +286,20 @@ local function replaceWindowInSlot(slot, newWinId)
 	local col = space.cols[slot.colIdx]
 	if not col then return false end
 
+	local oldWinId = slot.deadWindowId
 	col[slot.rowIdx] = newWinId
+
+	-- Update windowStack: replace old ID with new ID to preserve stack position
+	-- This handles ID swaps (Chrome reload, tab detach, etc.) without losing history
+	if oldWinId then
+		for i, wid in ipairs(state.windowStack) do
+			if wid == oldWinId then
+				state.windowStack[i] = newWinId
+				break
+			end
+		end
+	end
+
 	return true
 end
 
@@ -480,9 +494,11 @@ local function scheduleFocusCommit(winId, delay)
 	end)
 end
 
--- Suppress focus commits temporarily (called before WM actions that manage stack)
+-- Suppress focus handling temporarily (called before WM actions that manage stack/spaces)
+-- This prevents focus events from interfering with programmatic navigation
 function Events.suppressFocus()
 	suppressFocusCommit = true
+	suppressFocusHandler = true
 	if focusCommitTimer then
 		focusCommitTimer:stop()
 		focusCommitTimer = nil
@@ -490,9 +506,10 @@ function Events.suppressFocus()
 	pendingFocusWinId = nil
 end
 
--- Re-enable focus commits (called after WM action completes)
+-- Re-enable focus handling (called after WM action completes)
 function Events.resumeFocus()
 	suppressFocusCommit = false
+	suppressFocusHandler = false
 end
 
 function Events.stop()
@@ -555,9 +572,16 @@ function Events.init(wm)
 		local winId = win:id()
 		print("[windowFocused]", win:title(), winId)
 
-		-- Clear urgency for focused window (immediate)
+		-- Clear urgency for focused window (immediate, even when suppressed)
 		if state.urgentWindows[winId] then
 			clearWindowUrgent(winId)
+		end
+
+		-- Skip space-switching and viewport logic when suppressed
+		-- (during programmatic navigation like navigateStack)
+		if suppressFocusHandler then
+			print("[windowFocused] Suppressed - skipping space/viewport logic")
+			return
 		end
 
 		-- Check for space switching (immediate)
