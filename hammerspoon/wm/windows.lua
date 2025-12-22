@@ -14,6 +14,81 @@ local _windows = {}
 local wm = nil
 local state = nil
 
+------------------------------------------
+-- Fast Window Enumeration (CGWindowList)
+------------------------------------------
+
+-- Get all on-screen standard windows using CGWindowList (fast, no AX API)
+-- Returns: {
+--   byId = { [winId] = { id, appName, frame, layer, zIndex } },
+--   zOrder = { winId1, winId2, ... } (front-to-back order),
+--   validIds = { [winId] = true } (set of valid window IDs),
+--   byApp = { [appName] = { winId1, winId2, ... } }
+-- }
+-- Note: layer 0 = standard windows, higher layers = system UI
+function Windows.getWindowsFromCGWindowList()
+	local result = {
+		byId = {},
+		zOrder = {},
+		validIds = {},
+		byApp = {},
+	}
+
+	local cgWindows = hs.window.list() or {}
+
+	for zIndex, cgWin in ipairs(cgWindows) do
+		local winId = cgWin.kCGWindowNumber
+		local appName = cgWin.kCGWindowOwnerName or "unknown"
+		local isOnscreen = cgWin.kCGWindowIsOnscreen
+		local layer = cgWin.kCGWindowLayer or 0
+		local bounds = cgWin.kCGWindowBounds or {}
+
+		-- Only include on-screen windows at layer 0 (standard windows)
+		if isOnscreen and layer == 0 then
+			local frame = {
+				x = bounds.X or 0,
+				y = bounds.Y or 0,
+				w = bounds.Width or 0,
+				h = bounds.Height or 0,
+			}
+
+			result.byId[winId] = {
+				id = winId,
+				appName = appName,
+				frame = frame,
+				layer = layer,
+				zIndex = zIndex,
+			}
+			table.insert(result.zOrder, winId)
+			result.validIds[winId] = true
+
+			-- Group by app name
+			result.byApp[appName] = result.byApp[appName] or {}
+			table.insert(result.byApp[appName], winId)
+		end
+	end
+
+	return result
+end
+
+-- Check if a window is likely fullscreen based on its frame matching screen bounds
+-- This avoids needing to call win:isFullScreen() which uses AX API
+function Windows.isLikelyFullscreen(frame, screenId)
+	if not frame or not screenId then
+		return false
+	end
+	local screen = hs.screen(screenId)
+	if not screen then
+		return false
+	end
+	local screenFrame = screen:fullFrame() -- Use fullFrame to include menu bar area
+	local tolerance = 10
+	return math.abs(frame.x - screenFrame.x) < tolerance
+		and math.abs(frame.y - screenFrame.y) < tolerance
+		and math.abs(frame.w - screenFrame.w) < tolerance
+		and math.abs(frame.h - screenFrame.h) < tolerance
+end
+
 -- Forward declarations for callbacks
 local updateMenubar
 local buildCommandPaletteChoices
@@ -153,6 +228,8 @@ function Windows.focusWindow(w, callback)
 			if screenId and spaceId and state.screens[screenId] and state.screens[screenId][spaceId] then
 				local cols = state.screens[screenId][spaceId].cols
 				Windows.updateZOrder(cols, winId)
+				-- Refocus after z-order update since raise() can steal focus (especially same-app windows)
+				w:focus()
 			end
 
 			if callback then
@@ -241,13 +318,13 @@ function Windows.updateZOrder(cols, focusedWindowId)
 		return math.abs(colIdx - focusedColIdx)
 	end
 
-	-- Get current z-order positions (lower = more in front)
+	-- Get current z-order positions from CGWindowList (lower = more in front)
+	-- This is much faster than hs.window.orderedWindows() which uses the Accessibility API
 	local currentZPos = {}
 	do
-		local idx = 1
-		for _, w in ipairs(hs.window.orderedWindows()) do
-			currentZPos[w:id()] = idx
-			idx = idx + 1
+		local cgData = Windows.getWindowsFromCGWindowList()
+		for idx, winId in ipairs(cgData.zOrder) do
+			currentZPos[winId] = idx
 		end
 	end
 
@@ -294,6 +371,7 @@ function Windows.updateZOrder(cols, focusedWindowId)
 	end)
 
 	for _, item in ipairs(toRaise) do
+		print(string.format("[updateZOrder] Raising window %d (dist=%d from focus)", item.id, item.dist))
 		item.win:raise()
 	end
 end
@@ -353,6 +431,36 @@ function Windows.addToWindowStack(win)
 	--     local marker = (i == state.windowStackIndex) and ">" or " "
 	--     print(string.format("%s [%d] %s", marker, i, title))
 	-- end
+end
+
+-- Debounced version of addToWindowStack for wayfinding navigation
+-- Only adds to stack after user has "settled" on a window for `delay` seconds
+local pendingStackAdd = nil
+local pendingStackAddTimer = nil
+
+function Windows.debouncedAddToWindowStack(win, delay)
+	delay = delay or 2.0 -- default 2 second settle time
+
+	-- Cancel any pending add
+	if pendingStackAddTimer then
+		pendingStackAddTimer:stop()
+		pendingStackAddTimer = nil
+	end
+
+	if not win or not win:id() then
+		return
+	end
+
+	pendingStackAdd = win:id()
+	pendingStackAddTimer = Timer.doAfter(delay, function()
+		pendingStackAddTimer = nil
+		-- Only add if still focused on this window
+		local current = Window.focusedWindow()
+		if current and current:id() == pendingStackAdd then
+			Windows.addToWindowStack(current)
+		end
+		pendingStackAdd = nil
+	end)
 end
 
 -- Utility: Flatten nested tables

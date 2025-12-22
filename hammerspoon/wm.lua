@@ -340,10 +340,61 @@ function WM:saveState()
 	WM.State.save()
 end
 
+-- Fast reinitialize: reload state and retile without recreating event watchers
+-- Use this for quick reloads (cmd+ctrl+r) instead of full init()
+function WM:reinit()
+	local initStart = hs.timer.secondsSinceEpoch()
+	local stepStart = initStart
+	local function profile(label)
+		local now = hs.timer.secondsSinceEpoch()
+		local elapsed = (now - stepStart) * 1000
+		print(string.format("[reinit profile] %s: %.2fms", label, elapsed))
+		stepStart = now
+	end
+
+	print("[reinit] Starting fast reinitialize")
+
+	-- 1. Fast state reinit (uses CGWindowList, minimal AX API calls)
+	WM.State.reinit(WM)
+	profile("State.reinit")
+
+	-- 2. Clean window stack
+	cleanWindowStack()
+	profile("cleanWindowStack")
+
+	-- 3. Retile all spaces
+	for screenId, spaces in pairs(state.screens) do
+		for spaceId, _ in pairs(spaces) do
+			if state.activeSpaceForScreen[screenId] == spaceId then
+				retile(screenId, spaceId)
+			else
+				moveSpaceWindowsOffscreen(screenId, spaceId)
+			end
+		end
+	end
+	profile("Retile all spaces")
+
+	-- 4. Update menubar
+	updateMenubar()
+	profile("updateMenubar")
+
+	-- 5. Add focused window to stack
+	addToWindowStack(Window.focusedWindow())
+	profile("addToWindowStack")
+
+	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
+	print(string.format("[reinit] Fast reinitialize complete - TOTAL: %.2fms", totalTime))
+end
+
 -- Setup UI components (menubar and command palette)
 -- Delegate showCommandPalette to UI module
 function WM:showCommandPalette()
 	return WM.UI.showCommandPalette()
+end
+
+-- Delegate showMoveWindowToSpacePalette to UI module
+function WM:showMoveWindowToSpacePalette()
+	return WM.UI.showMoveWindowToSpacePalette()
 end
 
 function WM:init()

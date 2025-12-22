@@ -90,6 +90,9 @@ end)
 hs.hotkey.bind({ "cmd", "ctrl" }, "f", function()
 	WM:toggleFullscreen()
 end)
+hs.hotkey.bind({ "cmd", "ctrl", "shift" }, "f", function()
+	WM.Actions.toggleFloating()
+end)
 hs.hotkey.bind({ "cmd", "ctrl" }, "w", function()
 	WM:closeFocusedWindow()
 end)
@@ -176,8 +179,8 @@ hs.hotkey.bind({ "cmd", "ctrl", "shift" }, "`", function()
 			end
 		end
 	else
-		-- Show palette normally
-		WM:showCommandPalette()
+		-- Show palette directly in "move window to space" mode
+		WM:showMoveWindowToSpacePalette()
 	end
 end)
 
@@ -247,10 +250,10 @@ applicationHotkey(
 )
 
 -- Reload --
--- Reinitialize window manager (fast, no full Hammerspoon reload)
+-- Fast reinitialize window manager (preserves event watchers, no full Hammerspoon reload)
 hs.hotkey.bind({ "cmd", "ctrl" }, "r", function()
 	WM:saveState()
-	WM:init()
+	WM:reinit()
 end)
 
 -- Full Hammerspoon reload

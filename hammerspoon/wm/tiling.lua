@@ -276,6 +276,9 @@ local function bringIntoView(win)
 	end
 	local screenFrame = screen:frame()
 
+	-- Check focus mode
+	local focusMode = state.focusMode or "center"
+
 	-- Total width (plus gaps) before the target window in the stack
 	local preWidth = 0
 	for i = 1, colIdx - 1 do
@@ -286,17 +289,46 @@ local function bringIntoView(win)
 		end
 	end
 
-	-- Current on-screen position of the target window
-	local currentLeft = win:frame().x
-	local currentRight = win:frame().x + win:frame().w
-
+	local winFrame = win:frame()
 	local newStartX
-	if currentLeft < 0 then
-		newStartX = -preWidth
-	elseif currentRight > screenFrame.w then
-		newStartX = -preWidth + screenFrame.w - win:frame().w
-	else
-		newStartX = -preWidth + currentLeft
+
+	if focusMode == "center" then
+		-- Center mode: always center the focused window on screen
+		local targetX = (screenFrame.w - winFrame.w) / 2
+		newStartX = targetX - preWidth
+	elseif focusMode == "edge" then
+		-- Edge mode: snap to nearest edge, or center if only window
+		local cols = state.screens[screenId][spaceId].cols
+		if #cols == 1 then
+			-- Only one column - center it
+			local targetX = (screenFrame.w - winFrame.w) / 2
+			newStartX = targetX - preWidth
+		else
+			-- Multiple columns - snap to nearest edge
+			local currentLeft = winFrame.x
+			local currentRight = winFrame.x + winFrame.w
+
+			-- Check if window is off-screen
+			if currentLeft < screenFrame.x then
+				-- Off left edge - snap to left
+				newStartX = screenFrame.x - preWidth
+			elseif currentRight > screenFrame.x + screenFrame.w then
+				-- Off right edge - snap to right
+				newStartX = screenFrame.x + screenFrame.w - winFrame.w - preWidth
+			else
+				-- Window is on-screen - snap to nearest edge
+				local distToLeft = currentLeft - screenFrame.x
+				local distToRight = (screenFrame.x + screenFrame.w) - currentRight
+
+				if distToLeft <= distToRight then
+					-- Closer to left edge
+					newStartX = screenFrame.x - preWidth
+				else
+					-- Closer to right edge
+					newStartX = screenFrame.x + screenFrame.w - winFrame.w - preWidth
+				end
+			end
+		end
 	end
 
 	-- Only retile if startX actually changed

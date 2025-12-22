@@ -339,6 +339,36 @@ function UI.updateMenubar()
 		})
 	end
 
+	-- Add separator
+	table.insert(menu, { title = "-" })
+
+	-- Add focus mode submenu
+	local focusMode = state.focusMode or "center"
+	local focusModeLabels = {
+		center = "Center",
+		edge = "Edge",
+	}
+
+	table.insert(menu, {
+		title = "Focus Mode: " .. focusModeLabels[focusMode],
+		menu = {
+			{
+				title = "Center",
+				checked = (focusMode == "center"),
+				fn = function()
+					WM.Actions.setFocusMode("center")
+				end,
+			},
+			{
+				title = "Edge",
+				checked = (focusMode == "edge"),
+				fn = function()
+					WM.Actions.setFocusMode("edge")
+				end,
+			},
+		},
+	})
+
 	UI._menubar:setTitle(title)
 	UI._menubar:setMenu(menu)
 end
@@ -351,6 +381,28 @@ function UI.showCommandPalette()
 
 	-- Reset to root mode
 	commandPaletteMode = "root"
+	modeStack = {}
+
+	-- Clean window stack before building choices to ensure fresh MRU data
+	Windows.cleanWindowStack()
+
+	-- Refresh choices when showing
+	local choices = buildCommandPaletteChoices()
+	UI.commandPalette:choices(choices)
+	previousChoicesCount = #choices
+	UI.commandPalette:query("") -- Clear search text from previous invocation
+	UI.commandPalette:show()
+end
+
+-- Show command palette directly in "move window to space" mode
+function UI.showMoveWindowToSpacePalette()
+	if not UI.commandPalette then
+		return
+	end
+
+	-- Go directly to moveWindowToSpace mode, with root as the back target
+	modeStack = { "root" }
+	commandPaletteMode = "moveWindowToSpace"
 
 	-- Clean window stack before building choices to ensure fresh MRU data
 	Windows.cleanWindowStack()

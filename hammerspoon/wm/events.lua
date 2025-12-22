@@ -42,6 +42,12 @@ local pendingFocusWinId = nil   -- pending focus to commit after settling
 local suppressFocusCommit = false -- flag to suppress focus commits during WM operations
 local suppressFocusHandler = false -- flag to suppress entire focus handler during navigation
 
+-- Fullscreen transition handling
+-- When a window enters/exits native fullscreen, macOS fires a storm of events
+-- that can corrupt state. We use a cooldown period to let the transition settle.
+local fullscreenCooldownUntil = 0  -- timestamp when cooldown ends
+local FULLSCREEN_COOLDOWN_MS = 500 -- how long to wait after fullscreen events
+
 ------------------------------------------
 -- Helper functions
 ------------------------------------------
@@ -309,27 +315,21 @@ end
 
 -- The core reconciliation function: syncs tracked state to actual window reality
 function Events.reconcile()
-	local reconcileStart = hs.timer.secondsSinceEpoch()
-
-	-- Get all actual windows from macOS
-	local allWindows = hs.window.allWindows()
-
-	-- Build set of actual window IDs that should be managed
-	local actualWindows = {}  -- windowId -> {win, screenId, app, frame}
-	for _, win in ipairs(allWindows) do
-		if win:isStandard() and win:isVisible() and not win:isFullScreen() then
-			local screen = win:screen()
-			local app = win:application()
-			if screen and app then
-				actualWindows[win:id()] = {
-					win = win,
-					screenId = screen:id(),
-					app = app:name(),
-					frame = win:frame(),
-				}
-			end
-		end
+	-- Check if we're in a fullscreen transition cooldown
+	local now = hs.timer.secondsSinceEpoch()
+	if now < fullscreenCooldownUntil then
+		local remaining = math.floor((fullscreenCooldownUntil - now) * 1000)
+		print(string.format("[reconcile] Skipped - fullscreen transition cooldown (%dms remaining)", remaining))
+		return
 	end
+
+	local reconcileStart = now
+
+	-- Get all windows from CGWindowList (fast, no AX API blocking)
+	-- This gives us window IDs, app names, frames, and z-order without blocking
+	local cgData = Windows.getWindowsFromCGWindowList()
+	local windowServerIds = cgData.validIds  -- windowId -> true
+	local windowServerInfo = cgData.byId     -- windowId -> { id, appName, frame, layer, zIndex }
 
 	-- Build set of tracked window IDs
 	local trackedWindows = {}  -- windowId -> {screenId, spaceId, colIdx, rowIdx}
@@ -348,13 +348,53 @@ function Events.reconcile()
 		end
 	end
 
-	-- Build set of window IDs that exist at window server level (CGWindowList)
-	-- This is independent of the Accessibility API and sees ALL windows,
-	-- even those temporarily inaccessible due to modal dialogs or AXUnknown state
-	local windowServerIds = {}  -- windowId -> appName
-	for _, cgWin in ipairs(hs.window.list() or {}) do
-		if cgWin.kCGWindowIsOnscreen then
-			windowServerIds[cgWin.kCGWindowNumber] = cgWin.kCGWindowOwnerName
+	-- Build set of actual window IDs that should be managed
+	-- For windows already tracked: use CGWindowList data (fast)
+	-- For new windows: query AX API only for that specific window (targeted, not all apps)
+	local actualWindows = {}  -- windowId -> {win, screenId, app, frame}
+
+	-- First, check tracked windows against CGWindowList
+	for winId, pos in pairs(trackedWindows) do
+		if windowServerIds[winId] then
+			-- Window still exists at window server level
+			local info = windowServerInfo[winId]
+			if info then
+				-- Use cached hs.window object for frame/screen info
+				local win = Windows.getWindow(winId)
+				if win then
+					local screen = win:screen()
+					if screen and not Windows.isLikelyFullscreen(info.frame, screen:id()) then
+						actualWindows[winId] = {
+							win = win,
+							screenId = screen:id(),
+							app = info.appName,
+							frame = info.frame,
+						}
+					end
+				end
+			end
+		end
+	end
+
+	-- Second, find NEW windows that aren't tracked yet
+	-- Only query AX API for windows we don't already know about
+	for winId, info in pairs(windowServerInfo) do
+		if not trackedWindows[winId] and not actualWindows[winId] then
+			-- New window - need to verify it's standard/visible via AX API
+			-- But only query THIS specific window, not all windows
+			local win = hs.window(winId)
+			if win and win:isStandard() and win:isVisible() and not win:isFullScreen() then
+				local screen = win:screen()
+				local app = win:application()
+				if screen and app then
+					actualWindows[winId] = {
+						win = win,
+						screenId = screen:id(),
+						app = app:name(),
+						frame = win:frame(),
+					}
+				end
+			end
 		end
 	end
 
@@ -372,7 +412,8 @@ function Events.reconcile()
 			if windowServerIds[winId] then
 				-- BUT it still exists at window server level!
 				-- This means it's temporarily inaccessible (modal dialog, AXUnknown, etc.)
-				skippedWindows[winId] = windowServerIds[winId]
+				local info = windowServerInfo[winId]
+				skippedWindows[winId] = info and info.appName or "unknown"
 			else
 				-- Gone from BOTH APIs - truly destroyed, safe to remove
 				print(string.format("[reconcile] Removing dead window %d from space=%s col=%d row=%d",
@@ -390,7 +431,7 @@ function Events.reconcile()
 	if skippedCount > 0 then
 		print(string.format("[reconcile] Skipped %d windows (inaccessible to AX but exist in window server):", skippedCount))
 		for winId, appName in pairs(skippedWindows) do
-			print(string.format("[reconcile]   - window %d (%s)", winId, appName or "unknown"))
+			print(string.format("[reconcile]   - window %d (%s)", winId, appName))
 		end
 	end
 
@@ -507,9 +548,17 @@ function Events.suppressFocus()
 end
 
 -- Re-enable focus handling (called after WM action completes)
+-- Uses a short delay to let async window focus events settle before resuming
+local resumeFocusTimer = nil
 function Events.resumeFocus()
-	suppressFocusCommit = false
-	suppressFocusHandler = false
+	if resumeFocusTimer then
+		resumeFocusTimer:stop()
+	end
+	resumeFocusTimer = hs.timer.doAfter(0.05, function()
+		resumeFocusTimer = nil
+		suppressFocusCommit = false
+		suppressFocusHandler = false
+	end)
 end
 
 function Events.stop()
@@ -587,6 +636,7 @@ function Events.init(wm)
 		-- Check for space switching (immediate)
 		local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
 		if screenId and spaceId then
+			print(string.format("[windowFocused] suppressed=%s - bringIntoView for %d", tostring(suppressFocusHandler), winId))
 			if state.activeSpaceForScreen[screenId] ~= spaceId then
 				local oldSpaceId = state.activeSpaceForScreen[screenId]
 				state.activeSpaceForScreen[screenId] = spaceId
@@ -621,12 +671,81 @@ function Events.init(wm)
 	profile("subscribe windowDestroyed")
 
 	-- Fullscreen/unfullscreen handler
-	windowWatcher:subscribe(
-		{ hs.window.filter.windowFullscreened, hs.window.filter.windowUnfullscreened },
-		function(win, appName, event)
-			debouncedReconcile()
+	-- IMPORTANT: We don't call reconcile here. Instead we:
+	-- 1. Set a cooldown to prevent other events from triggering reconcile during the transition
+	-- 2. Handle the fullscreen state change explicitly
+	windowWatcher:subscribe(hs.window.filter.windowFullscreened, function(win, appName, event)
+		local winId = win:id()
+		print(string.format("[windowFullscreened] %s (id=%d) - setting cooldown", appName, winId))
+
+		-- Set cooldown to prevent reconcile during the transition animation
+		fullscreenCooldownUntil = hs.timer.secondsSinceEpoch() + (FULLSCREEN_COOLDOWN_MS / 1000)
+
+		-- Remove window from tiling (it's now in native fullscreen)
+		local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
+		if screenId and spaceId and colIdx and rowIdx then
+			-- Save position for potential restoration later
+			state.fullscreenSavedPositions = state.fullscreenSavedPositions or {}
+			state.fullscreenSavedPositions[winId] = {
+				screenId = screenId,
+				spaceId = spaceId,
+				colIdx = colIdx,
+				rowIdx = rowIdx,
+			}
+
+			-- Remove from state
+			local pos = { screenId = screenId, spaceId = spaceId, colIdx = colIdx, rowIdx = rowIdx }
+			removeWindowFromState(winId, pos)
+			print(string.format("[windowFullscreened] Removed window %d from tiling (was at col=%d, row=%d)", winId, colIdx, rowIdx))
+
+			-- Retile the space to fill the gap
+			retile(screenId, spaceId)
 		end
-	)
+	end)
+
+	windowWatcher:subscribe(hs.window.filter.windowUnfullscreened, function(win, appName, event)
+		local winId = win:id()
+		print(string.format("[windowUnfullscreened] %s (id=%d) - setting cooldown", appName, winId))
+
+		-- Set cooldown to prevent reconcile during the transition animation
+		fullscreenCooldownUntil = hs.timer.secondsSinceEpoch() + (FULLSCREEN_COOLDOWN_MS / 1000)
+
+		-- Schedule re-adding the window after the animation completes
+		-- We use a timer to let macOS finish the unfullscreen animation
+		hs.timer.doAfter(FULLSCREEN_COOLDOWN_MS / 1000, function()
+			-- Check if window still exists and isn't already tracked
+			local existingScreenId = locateWindow(winId)
+			if existingScreenId then
+				print(string.format("[windowUnfullscreened] Window %d already in state, skipping", winId))
+				return
+			end
+
+			-- Try to restore to saved position
+			local savedPos = state.fullscreenSavedPositions and state.fullscreenSavedPositions[winId]
+			if savedPos and state.screens[savedPos.screenId] and state.screens[savedPos.screenId][savedPos.spaceId] then
+				local cols = state.screens[savedPos.screenId][savedPos.spaceId].cols
+				-- Insert at saved column position (or at end if column no longer exists)
+				local targetColIdx = math.min(savedPos.colIdx, #cols + 1)
+				if targetColIdx <= #cols and cols[targetColIdx] then
+					-- Insert into existing column at saved row
+					local targetRowIdx = math.min(savedPos.rowIdx, #cols[targetColIdx] + 1)
+					table.insert(cols[targetColIdx], targetRowIdx, winId)
+				else
+					-- Create new column
+					cols[targetColIdx] = { winId }
+				end
+				print(string.format("[windowUnfullscreened] Restored window %d to col=%d", winId, targetColIdx))
+				retile(savedPos.screenId, savedPos.spaceId)
+				state.fullscreenSavedPositions[winId] = nil
+			else
+				-- No saved position - let reconcile handle it on next event
+				print(string.format("[windowUnfullscreened] No saved position for window %d, will reconcile later", winId))
+				-- Clear cooldown so next event can trigger reconcile
+				fullscreenCooldownUntil = 0
+				debouncedReconcile()
+			end
+		end)
+	end)
 	profile("subscribe fullscreen")
 
 	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000

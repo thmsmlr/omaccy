@@ -83,6 +83,10 @@ local state = {
 	fullscreenOriginalWidth = {},
 	urgentWindows = {},
 	columnHeightRatios = {},
+	-- Focus mode: "center" (auto-center focused window), "edge" (snap to nearest edge)
+	focusMode = "center",
+	-- Floating window frames: windowId -> {x, y, w, h} for position persistence
+	floatingFrames = {},
 }
 
 ------------------------------------------
@@ -90,18 +94,32 @@ local state = {
 ------------------------------------------
 
 -- Get all currently open standard windows and build lookup table
+-- Uses CGWindowList for fast enumeration, then only queries specific windows via AX API
 -- Returns: windows list, validWindowIds set
 local function getCurrentWindowsWithLookup()
 	local windows = {}
 	local validIds = {}
-	for _, app in ipairs(Application.runningApplications()) do
-		for _, win in ipairs(app:allWindows()) do
-			if win:isStandard() and win:isVisible() and not win:isFullScreen() then
+
+	-- Get all windows from CGWindowList (fast, no AX API blocking)
+	local cgWindows = hs.window.list() or {}
+
+	for _, cgWin in ipairs(cgWindows) do
+		local winId = cgWin.kCGWindowNumber
+		local isOnscreen = cgWin.kCGWindowIsOnscreen
+		local layer = cgWin.kCGWindowLayer or 0
+
+		-- Only process on-screen windows at layer 0 (standard windows)
+		if isOnscreen and layer == 0 then
+			-- Query the specific window via AX API to verify it's standard/visible
+			-- This is targeted (one window at a time) rather than querying all apps
+			local win = Window(winId)
+			if win and win:isStandard() and win:isVisible() and not win:isFullScreen() then
 				table.insert(windows, win)
-				validIds[win:id()] = true
+				validIds[winId] = true
 			end
 		end
 	end
+
 	return windows, validIds
 end
 
@@ -112,6 +130,162 @@ end
 -- Get the state table (for backwards compatibility)
 function State.get()
 	return state
+end
+
+-- Fast reinit: Only verify existing windows and add new ones
+-- Skips expensive per-window AX API checks by trusting CGWindowList
+-- Returns: savedState for use by callers
+function State.reinit(wm)
+	local initStart = hs.timer.secondsSinceEpoch()
+	local stepStart = initStart
+	local function profile(label)
+		local now = hs.timer.secondsSinceEpoch()
+		local elapsed = (now - stepStart) * 1000
+		print(string.format("[State.reinit profile] %s: %.2fms", label, elapsed))
+		stepStart = now
+	end
+
+	State.wm = wm
+	print("[State.reinit] Fast state reinit starting")
+
+	-- 1. Load saved state
+	local savedState = State.load()
+	profile("load")
+
+	-- 2. Get CGWindowList (fast, no AX API)
+	local cgData = hs.window.list() or {}
+	local validCGIds = {}
+	for _, cgWin in ipairs(cgData) do
+		if cgWin.kCGWindowIsOnscreen and (cgWin.kCGWindowLayer or 0) == 0 then
+			validCGIds[cgWin.kCGWindowNumber] = true
+		end
+	end
+	profile("CGWindowList")
+
+	-- 3. Build set of tracked window IDs from saved state
+	local trackedIds = {}
+	for screenId, spaces in pairs(savedState.screens or {}) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				for _, col in ipairs(space.cols) do
+					for _, winId in ipairs(col) do
+						trackedIds[winId] = true
+					end
+				end
+			end
+		end
+	end
+	profile("build tracked set")
+
+	-- 4. Remove dead windows from saved state (not in CGWindowList)
+	local deadCount = 0
+	for screenId, spaces in pairs(savedState.screens or {}) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				for colIdx = #space.cols, 1, -1 do
+					local col = space.cols[colIdx]
+					for rowIdx = #col, 1, -1 do
+						local winId = col[rowIdx]
+						if not validCGIds[winId] then
+							table.remove(col, rowIdx)
+							deadCount = deadCount + 1
+						end
+					end
+					if #col == 0 then
+						table.remove(space.cols, colIdx)
+					end
+				end
+			end
+		end
+	end
+	if deadCount > 0 then
+		print(string.format("[State.reinit] Removed %d dead windows", deadCount))
+	end
+	profile("remove dead windows")
+
+	-- 5. Restore non-window state
+	state.windowStack = savedState.windowStack or {}
+	state.windowStackIndex = savedState.windowStackIndex or 1
+	state.fullscreenOriginalWidth = savedState.fullscreenOriginalWidth or {}
+	state.urgentWindows = savedState.urgentWindows or {}
+	state.activeSpaceForScreen = savedState.activeSpaceForScreen or {}
+	state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or {}
+	state.columnHeightRatios = savedState.columnHeightRatios or {}
+	profile("restore non-window state")
+
+	-- 6. Initialize screen structures
+	State.initializeScreenStructures(savedState)
+	profile("initializeScreenStructures")
+
+	-- 7. Place tracked windows back into state (fast, no AX API)
+	for screenId, spaces in pairs(savedState.screens or {}) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols and state.screens[screenId] and state.screens[screenId][spaceId] then
+				for colIdx, col in ipairs(space.cols) do
+					for _, winId in ipairs(col) do
+						if validCGIds[winId] then
+							-- Window is valid, place it
+							local cols = state.screens[screenId][spaceId].cols
+							cols[colIdx] = cols[colIdx] or {}
+							table.insert(cols[colIdx], winId)
+						end
+					end
+				end
+			end
+		end
+	end
+	profile("place tracked windows")
+
+	-- 8. Find and add new windows (only query AX API for genuinely new windows)
+	local newCount = 0
+	for winId, _ in pairs(validCGIds) do
+		if not trackedIds[winId] then
+			-- New window - need to verify via AX API (targeted query)
+			local win = Window(winId)
+			if win and win:isStandard() and win:isVisible() and not win:isFullScreen() then
+				local screen = win:screen()
+				if screen then
+					local screenId = screen:id()
+					local spaceId = state.activeSpaceForScreen[screenId] or 1
+					if state.screens[screenId] and state.screens[screenId][spaceId] then
+						table.insert(state.screens[screenId][spaceId].cols, { winId })
+						newCount = newCount + 1
+					end
+				end
+			end
+		end
+	end
+	if newCount > 0 then
+		print(string.format("[State.reinit] Added %d new windows", newCount))
+	end
+	profile("add new windows")
+
+	-- 9. Clean up empty columns
+	for screenId, spaces in pairs(state.screens) do
+		for spaceId, space in pairs(spaces) do
+			if space.cols then
+				for colIdx = #space.cols, 1, -1 do
+					if not space.cols[colIdx] or #space.cols[colIdx] == 0 then
+						table.remove(space.cols, colIdx)
+					end
+				end
+			end
+		end
+	end
+	profile("cleanup empty columns")
+
+	-- 10. Clean stale urgentWindows entries
+	for winId, _ in pairs(state.urgentWindows) do
+		if not validCGIds[winId] then
+			state.urgentWindows[winId] = nil
+		end
+	end
+	profile("clean urgentWindows")
+
+	local totalTime = (hs.timer.secondsSinceEpoch() - initStart) * 1000
+	print(string.format("[State.reinit] Complete - TOTAL: %.2fms", totalTime))
+
+	return savedState
 end
 
 -- Reset state to initial values (for reinit)
@@ -419,6 +593,8 @@ function State.init(wm)
 	state.activeSpaceForScreen = savedState.activeSpaceForScreen or state.activeSpaceForScreen
 	state.startXForScreenAndSpace = savedState.startXForScreenAndSpace or state.startXForScreenAndSpace
 	state.columnHeightRatios = savedState.columnHeightRatios or state.columnHeightRatios
+	state.focusMode = savedState.focusMode or state.focusMode
+	state.floatingFrames = savedState.floatingFrames or state.floatingFrames
 	profile("restore non-window state")
 
 	-- 2a. Get all current windows once (expensive operation)

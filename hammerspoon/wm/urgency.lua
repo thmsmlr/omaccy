@@ -65,6 +65,7 @@ function Urgency.setCurrentWindowUrgent()
 end
 
 -- Mark all windows of a specific app as urgent
+-- Uses CGWindowList for fast enumeration
 function Urgency.setUrgentByApp(appName)
 	local app = Application.get(appName)
 	if not app then
@@ -72,10 +73,15 @@ function Urgency.setUrgentByApp(appName)
 		return
 	end
 
+	-- Get app windows from CGWindowList (fast)
+	local cgData = Windows.getWindowsFromCGWindowList()
+	local appWindowIds = cgData.byApp[app:name()] or {}
+
 	local count = 0
-	for _, win in ipairs(app:allWindows()) do
-		if win:isStandard() and win:isVisible() then
-			Urgency.setWindowUrgent(win:id(), true)
+	for _, winId in ipairs(appWindowIds) do
+		local win = Windows.getWindow(winId)
+		if win and win:isStandard() and win:isVisible() then
+			Urgency.setWindowUrgent(winId, true)
 			count = count + 1
 		end
 	end

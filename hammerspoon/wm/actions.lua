@@ -30,6 +30,7 @@ local Events
 -- Local references to frequently used functions (set during init)
 local getWindow
 local addToWindowStack
+local debouncedAddToWindowStack
 local cleanWindowStack
 local locateWindow
 local focusWindow
@@ -42,6 +43,9 @@ local bringIntoView
 local moveSpaceWindowsOffscreen
 local getUrgentWindowsInSpace
 local updateMenubar
+
+-- Forward declaration for local helper
+local centerWindowInView
 
 -- Constants (will be set from WM during init)
 local tileGap
@@ -116,11 +120,7 @@ function Actions.navigateStack(direction)
 	end
 
 	focusWindow(win, function()
-		-- Don't add to stack - we're navigating the existing stack
-		-- Only bringIntoView if we're not switching spaces (already positioned correctly)
-		if not switchingSpaces then
-			bringIntoView(win)
-		end
+		centerWindowInView(win)
 		centerMouseInWindow(win)
 		Events.resumeFocus()
 	end)
@@ -136,6 +136,9 @@ function Actions.focusDirection(direction)
 	if not currentColIdx then
 		return
 	end
+
+	-- Suppress focus handling to prevent z-order updates from stealing focus
+	Events.suppressFocus()
 
 	local cols = state.screens[currentScreenId][currentSpace].cols
 
@@ -170,9 +173,10 @@ function Actions.focusDirection(direction)
 				if windowExists(targetWinId) then
 					local nextWindow = getWindow(targetWinId)
 					focusWindow(nextWindow, function()
-						addToWindowStack(nextWindow)
+						debouncedAddToWindowStack(nextWindow)
 						bringIntoView(nextWindow)
 						centerMouseInWindow(nextWindow)
+						Events.resumeFocus()
 					end)
 					return
 				end
@@ -182,9 +186,10 @@ function Actions.focusDirection(direction)
 					if rowIdx ~= targetRowIdx and windowExists(winId) then
 						local nextWindow = getWindow(winId)
 						focusWindow(nextWindow, function()
-							addToWindowStack(nextWindow)
+							debouncedAddToWindowStack(nextWindow)
 							bringIntoView(nextWindow)
 							centerMouseInWindow(nextWindow)
+							Events.resumeFocus()
 						end)
 						return
 					end
@@ -194,6 +199,7 @@ function Actions.focusDirection(direction)
 			targetColIdx = targetColIdx + delta
 		end
 		-- No valid window found
+		Events.resumeFocus()
 		return
 	end
 
@@ -204,25 +210,31 @@ function Actions.focusDirection(direction)
 		currentRowIdx = currentRowIdx - 1
 	end
 	if currentRowIdx < 1 then
+		Events.resumeFocus()
 		return
 	end
 	if currentRowIdx > #cols[currentColIdx] then
+		Events.resumeFocus()
 		return
 	end
 
 	local targetWinId = cols[currentColIdx][currentRowIdx]
 	if not windowExists(targetWinId) then
 		-- For up/down, just skip if window doesn't exist
+		Events.resumeFocus()
 		return
 	end
 
 	local nextWindow = getWindow(targetWinId)
 	if nextWindow then
 		focusWindow(nextWindow, function()
-			addToWindowStack(nextWindow)
+			debouncedAddToWindowStack(nextWindow)
 			bringIntoView(nextWindow)
 			centerMouseInWindow(nextWindow)
+			Events.resumeFocus()
 		end)
+	else
+		Events.resumeFocus()
 	end
 end
 
@@ -699,7 +711,7 @@ function Actions.toggleFullscreen()
 end
 
 -- Helper to center a specific window in the view
-local function centerWindowInView(win)
+centerWindowInView = function(win)
 	if not win then
 		return
 	end
@@ -878,10 +890,174 @@ function Actions.closeFocusedWindow()
 end
 
 ------------------------------------------
+-- Focus Mode
+------------------------------------------
+
+-- Get current focus mode
+function Actions.getFocusMode()
+	return state.focusMode or "center"
+end
+
+-- Set focus mode: "center" or "edge"
+function Actions.setFocusMode(mode)
+	if mode ~= "center" and mode ~= "edge" then
+		print("[setFocusMode] Invalid mode:", mode)
+		return
+	end
+	state.focusMode = mode
+	print("[setFocusMode] Focus mode set to:", mode)
+	updateMenubar()
+end
+
+-- Cycle through focus modes: center -> edge -> center
+function Actions.cycleFocusMode()
+	local current = state.focusMode or "center"
+	local nextMode = (current == "center") and "edge" or "center"
+	Actions.setFocusMode(nextMode)
+end
+
+------------------------------------------
+-- Floating Windows
+------------------------------------------
+
+-- Check if a window is floating (in the floating layer, not tiled)
+function Actions.isWindowFloating(winId)
+	for screenId, spaces in pairs(state.screens) do
+		for spaceId, space in pairs(spaces) do
+			if space.floating then
+				for _, floatWinId in ipairs(space.floating) do
+					if floatWinId == winId then
+						return true, screenId, spaceId
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
+-- Toggle floating state of focused window
+function Actions.toggleFloating()
+	local win = hs.window.focusedWindow()
+	if not win then
+		return
+	end
+	local winId = win:id()
+
+	-- Check if already floating
+	local isFloating, floatScreenId, floatSpaceId = Actions.isWindowFloating(winId)
+
+	if isFloating then
+		-- Move from floating to tiled
+		print(string.format("[toggleFloating] Window %d: floating -> tiled", winId))
+
+		-- Remove from floating array
+		local floating = state.screens[floatScreenId][floatSpaceId].floating
+		for i, fid in ipairs(floating) do
+			if fid == winId then
+				table.remove(floating, i)
+				break
+			end
+		end
+
+		-- Add to tiled columns (at the end)
+		local cols = state.screens[floatScreenId][floatSpaceId].cols
+		table.insert(cols, { winId })
+
+		-- Retile to position the window
+		retile(floatScreenId, floatSpaceId)
+		bringIntoView(win)
+	else
+		-- Check if in tiled state
+		local screenId, spaceId, colIdx, rowIdx = locateWindow(winId)
+		if not screenId then
+			print(string.format("[toggleFloating] Window %d not in state, cannot float", winId))
+			return
+		end
+
+		print(string.format("[toggleFloating] Window %d: tiled -> floating", winId))
+
+		-- Save current frame for floating position
+		local frame = win:frame()
+		state.floatingFrames[winId] = {
+			x = frame.x,
+			y = frame.y,
+			w = frame.w,
+			h = frame.h,
+		}
+
+		-- Remove from tiled columns
+		local cols = state.screens[screenId][spaceId].cols
+		local col = cols[colIdx]
+		table.remove(col, rowIdx)
+
+		-- Remove empty column
+		if #col == 0 then
+			table.remove(cols, colIdx)
+
+			-- Shift height ratios
+			if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][spaceId] then
+				local spaceRatios = state.columnHeightRatios[screenId][spaceId]
+				local maxIdx = 0
+				for k in pairs(spaceRatios) do
+					if k > maxIdx then maxIdx = k end
+				end
+				for i = colIdx, maxIdx do
+					spaceRatios[i] = spaceRatios[i + 1]
+				end
+			end
+		else
+			-- Clear height ratios for this column
+			if state.columnHeightRatios[screenId] and state.columnHeightRatios[screenId][spaceId] then
+				state.columnHeightRatios[screenId][spaceId][colIdx] = nil
+			end
+		end
+
+		-- Add to floating array
+		state.screens[screenId][spaceId].floating = state.screens[screenId][spaceId].floating or {}
+		table.insert(state.screens[screenId][spaceId].floating, winId)
+
+		-- Retile to fill the gap (this happens behind the floating window)
+		retile(screenId, spaceId)
+
+		-- Animate the window to "pop out" - shrink slightly and center
+		-- This makes it visually clear that it's now floating
+		local shrinkAmount = 40  -- pixels to shrink on each side
+		local newFrame = {
+			x = frame.x + shrinkAmount,
+			y = frame.y + shrinkAmount,
+			w = frame.w - (shrinkAmount * 2),
+			h = frame.h - (shrinkAmount * 2),
+		}
+
+		-- Ensure minimum size
+		newFrame.w = math.max(newFrame.w, 200)
+		newFrame.h = math.max(newFrame.h, 150)
+
+		-- Animate to the smaller frame
+		win:setFrame(newFrame, 0.15)
+
+		-- Update saved frame to the new size
+		state.floatingFrames[winId] = {
+			x = newFrame.x,
+			y = newFrame.y,
+			w = newFrame.w,
+			h = newFrame.h,
+		}
+
+		-- Raise the floating window to top
+		win:raise()
+	end
+
+	updateMenubar()
+end
+
+------------------------------------------
 -- App Window Utilities (shared by launchOrFocusApp and URLs module)
 ------------------------------------------
 
 -- Find a window of a specific app on a specific space
+-- Uses CGWindowList to avoid slow app:allWindows() calls
 function Actions.findAppWindowOnSpace(bundleID, targetScreenId, targetSpaceId)
 	if not targetScreenId or not targetSpaceId then
 		return nil
@@ -905,35 +1081,55 @@ function Actions.findAppWindowOnSpace(bundleID, targetScreenId, targetSpaceId)
 		windowsInSpace[winId] = true
 	end
 
-	-- Find a window of the app in this space
+	-- Get app name from bundleID
 	local app = hs.application.get(bundleID)
 	if not app then
 		return nil
 	end
+	local appName = app:name()
 
-	for _, win in ipairs(app:allWindows()) do
-		if windowsInSpace[win:id()] and win:isStandard() then
-			return win
+	-- Get CGWindowList data to find windows by app name (fast)
+	local cgData = Windows.getWindowsFromCGWindowList()
+	local appWindowIds = cgData.byApp[appName] or {}
+
+	-- Find a window of this app that's in the target space
+	for _, winId in ipairs(appWindowIds) do
+		if windowsInSpace[winId] then
+			local win = getWindow(winId)
+			if win and win:isStandard() then
+				return win
+			end
 		end
 	end
 	return nil
 end
 
 -- Wait for a new window to appear (helper for launching)
+-- Uses CGWindowList for fast enumeration, only queries AX API for new windows
 local function waitForNewWindow(windowsBefore, bundleID, attempts, callback)
 	if attempts <= 0 then
 		print("[Actions] Gave up waiting for new window")
 		return
 	end
-	for _, win in ipairs(hs.window.allWindows()) do
-		if not windowsBefore[win:id()] then
-			local app = win:application()
-			if app and app:bundleID() == bundleID then
-				callback(win)
-				return
+
+	-- Get current windows from CGWindowList (fast)
+	local cgData = Windows.getWindowsFromCGWindowList()
+
+	-- Look for new window IDs that weren't in windowsBefore
+	for winId, info in pairs(cgData.byId) do
+		if not windowsBefore[winId] then
+			-- New window - verify it belongs to the target app via AX API (targeted query)
+			local win = hs.window(winId)
+			if win then
+				local app = win:application()
+				if app and app:bundleID() == bundleID then
+					callback(win)
+					return
+				end
 			end
 		end
 	end
+
 	hs.timer.doAfter(0.025, function()
 		waitForNewWindow(windowsBefore, bundleID, attempts - 1, callback)
 	end)
@@ -953,10 +1149,11 @@ function Actions.launchAppWindowOnSpace(bundleID, targetScreenId, targetSpaceId,
 
 	local app = hs.application.get(bundleID)
 
-	-- Track windows before launch
+	-- Track windows before launch using CGWindowList (fast)
 	local windowsBefore = {}
-	for _, win in ipairs(hs.window.allWindows()) do
-		windowsBefore[win:id()] = true
+	local cgData = Windows.getWindowsFromCGWindowList()
+	for winId, _ in pairs(cgData.byId) do
+		windowsBefore[winId] = true
 	end
 
 	-- Callback when new window appears
@@ -1006,9 +1203,12 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 
 	local app = hs.application.get(appName)
 	if app and focusIfExists then
+		-- Get app windows from CGWindowList (fast) instead of app:allWindows()
+		local cgData = Windows.getWindowsFromCGWindowList()
+		local appWindowIds = cgData.byApp[app:name()] or {}
 		local appWindowsById = {}
-		for _, win in ipairs(app:allWindows()) do
-			appWindowsById[win:id()] = win
+		for _, winId in ipairs(appWindowIds) do
+			appWindowsById[winId] = getWindow(winId)
 		end
 
 		local candidateWindowIds = {}
@@ -1086,23 +1286,26 @@ function Actions.launchOrFocusApp(appName, launchCommand, opts)
 		targetColIdx = 1
 	end
 
+	-- Track windows before launch using CGWindowList (fast)
 	local windowsBefore = {}
-	for _, win in ipairs(hs.window.allWindows()) do
-		windowsBefore[win:id()] = win
+	local cgDataBefore = Windows.getWindowsFromCGWindowList()
+	for winId, _ in pairs(cgDataBefore.byId) do
+		windowsBefore[winId] = true
 	end
 
 	local function waitForNewWindow(attempts, callback)
 		if attempts <= 0 then
 			return
 		end
-		local windowsAfter = {}
-		for _, win in ipairs(hs.window.allWindows()) do
-			windowsAfter[win:id()] = win
-		end
-		for winId, win in pairs(windowsAfter) do
+		-- Check for new windows using CGWindowList (fast)
+		local cgDataAfter = Windows.getWindowsFromCGWindowList()
+		for winId, _ in pairs(cgDataAfter.byId) do
 			if not windowsBefore[winId] then
-				callback(win)
-				return
+				local win = getWindow(winId)
+				if win then
+					callback(win)
+					return
+				end
 			end
 		end
 		hs.timer.doAfter(0.025, function()
@@ -1386,6 +1589,7 @@ function Actions.init(wm)
 	-- Cache function references
 	getWindow = Windows.getWindow
 	addToWindowStack = Windows.addToWindowStack
+	debouncedAddToWindowStack = Windows.debouncedAddToWindowStack
 	cleanWindowStack = Windows.cleanWindowStack
 	locateWindow = Windows.locateWindow
 	focusWindow = Windows.focusWindow
