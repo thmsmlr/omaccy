@@ -1425,6 +1425,102 @@ function Actions.scroll(direction, opts)
 end
 
 ------------------------------------------
+-- Same-App Window Cycling
+------------------------------------------
+
+-- Cycle to next window of the same app within the current virtual space
+function Actions.cycleAppWindows(direction)
+	direction = direction or "next"
+
+	local win = hs.window.focusedWindow()
+	if not win then
+		return
+	end
+
+	local app = win:application()
+	if not app then
+		return
+	end
+	local appName = app:name()
+	local currentWinId = win:id()
+
+	-- Get current screen and space
+	local currentScreen = hs.mouse.getCurrentScreen()
+	local screenId = currentScreen:id()
+	local spaceId = state.activeSpaceForScreen[screenId]
+
+	if not state.screens[screenId] or not state.screens[screenId][spaceId] then
+		return
+	end
+
+	-- Collect all windows of this app in the current space (in column order)
+	local appWindowIds = {}
+	local cols = state.screens[screenId][spaceId].cols
+	for _, col in ipairs(cols) do
+		for _, winId in ipairs(col) do
+			local w = getWindow(winId)
+			if w then
+				local wApp = w:application()
+				if wApp and wApp:name() == appName then
+					table.insert(appWindowIds, winId)
+				end
+			end
+		end
+	end
+
+	-- Also check floating windows
+	local floating = state.screens[screenId][spaceId].floating
+	if floating then
+		for _, winId in ipairs(floating) do
+			local w = getWindow(winId)
+			if w then
+				local wApp = w:application()
+				if wApp and wApp:name() == appName then
+					table.insert(appWindowIds, winId)
+				end
+			end
+		end
+	end
+
+	-- Need at least 2 windows to cycle
+	if #appWindowIds < 2 then
+		return
+	end
+
+	-- Find current window index
+	local currentIdx = nil
+	for i, winId in ipairs(appWindowIds) do
+		if winId == currentWinId then
+			currentIdx = i
+			break
+		end
+	end
+
+	if not currentIdx then
+		return
+	end
+
+	-- Calculate next index
+	local nextIdx
+	if direction == "next" then
+		nextIdx = (currentIdx % #appWindowIds) + 1
+	else
+		nextIdx = ((currentIdx - 2) % #appWindowIds) + 1
+	end
+
+	local nextWinId = appWindowIds[nextIdx]
+	local nextWin = getWindow(nextWinId)
+
+	if nextWin then
+		focusWindow(nextWin, function()
+			addToWindowStack(nextWin)
+			bringIntoView(nextWin)
+			centerMouseInWindow(nextWin)
+		end)
+	end
+end
+
+------------------------------------------
 -- Tab Navigation
 ------------------------------------------
 

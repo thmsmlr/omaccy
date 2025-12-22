@@ -52,6 +52,14 @@ hs.hotkey.bind({ "cmd", "ctrl" }, "i", function()
 	WM:navigateStack("in")
 end)
 
+-- Cycle windows of same app within current virtual space
+hs.hotkey.bind({ "cmd" }, "`", function()
+	WM.Actions.cycleAppWindows("next")
+end)
+hs.hotkey.bind({ "cmd", "shift" }, "`", function()
+	WM.Actions.cycleAppWindows("prev")
+end)
+
 hs.hotkey.bind({ "cmd", "ctrl" }, "h", function()
 	WM:focusDirection("left")
 end)
