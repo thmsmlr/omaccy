@@ -331,10 +331,11 @@ function Events.reconcile()
 	local windowServerIds = cgData.validIds  -- windowId -> true
 	local windowServerInfo = cgData.byId     -- windowId -> { id, appName, frame, layer, zIndex }
 
-	-- Build set of tracked window IDs
-	local trackedWindows = {}  -- windowId -> {screenId, spaceId, colIdx, rowIdx}
+	-- Build set of tracked window IDs (both tiled and floating)
+	local trackedWindows = {}  -- windowId -> {screenId, spaceId, colIdx, rowIdx, isFloating}
 	for screenId, spaces in pairs(state.screens) do
 		for spaceId, space in pairs(spaces) do
+			-- Track tiled windows
 			for colIdx, col in ipairs(space.cols) do
 				for rowIdx, winId in ipairs(col) do
 					trackedWindows[winId] = {
@@ -342,6 +343,17 @@ function Events.reconcile()
 						spaceId = spaceId,
 						colIdx = colIdx,
 						rowIdx = rowIdx,
+						isFloating = false,
+					}
+				end
+			end
+			-- Track floating windows
+			if space.floating then
+				for _, winId in ipairs(space.floating) do
+					trackedWindows[winId] = {
+						screenId = screenId,
+						spaceId = spaceId,
+						isFloating = true,
 					}
 				end
 			end
@@ -416,10 +428,26 @@ function Events.reconcile()
 				skippedWindows[winId] = info and info.appName or "unknown"
 			else
 				-- Gone from BOTH APIs - truly destroyed, safe to remove
-				print(string.format("[reconcile] Removing dead window %d from space=%s col=%d row=%d",
-					winId, tostring(pos.spaceId), pos.colIdx, pos.rowIdx))
+				if pos.isFloating then
+					-- Remove from floating array
+					print(string.format("[reconcile] Removing dead floating window %d from space=%s",
+						winId, tostring(pos.spaceId)))
+					local floating = state.screens[pos.screenId][pos.spaceId].floating
+					if floating then
+						for i, fid in ipairs(floating) do
+							if fid == winId then
+								table.remove(floating, i)
+								break
+							end
+						end
+					end
+				else
+					-- Remove from tiled columns
+					print(string.format("[reconcile] Removing dead window %d from space=%s col=%d row=%d",
+						winId, tostring(pos.spaceId), pos.colIdx, pos.rowIdx))
+					removeWindowFromState(winId, pos)
+				end
 				removedWindows[winId] = pos
-				removeWindowFromState(winId, pos)
 				removedAny = true
 			end
 		end
