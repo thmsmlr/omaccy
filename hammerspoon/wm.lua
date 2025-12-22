@@ -70,6 +70,7 @@ WM.UI = dofile(hs.configdir .. "/wm/ui.lua")
 WM.Events = dofile(hs.configdir .. "/wm/events.lua")
 WM.Actions = dofile(hs.configdir .. "/wm/actions.lua")
 WM.URLs = dofile(hs.configdir .. "/wm/urls.lua")
+WM.Expose = dofile(hs.configdir .. "/wm/expose.lua")
 
 -- Get state reference from State module
 local state = WM.State.get()
@@ -420,6 +421,9 @@ function WM:init()
 	if WM.UI and WM.UI.stop then
 		WM.UI.stop()
 	end
+	if WM.Expose and WM.Expose.stop then
+		WM.Expose.stop()
+	end
 	profile("Stop existing resources")
 
 	-- 1. Initialize State module (handles loading, cleaning, migration, reconciliation)
@@ -461,6 +465,10 @@ function WM:init()
 	-- 9. Initialize URLs module (same-space URL handling)
 	WM.URLs.init(WM)
 	profile("URLs.init")
+
+	-- 9b. Initialize Expose module (custom window overview)
+	WM.Expose.init(WM)
+	profile("Expose.init")
 
 	-- 10. Clean window stack
 	cleanWindowStack()

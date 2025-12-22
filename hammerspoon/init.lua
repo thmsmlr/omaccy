@@ -60,6 +60,28 @@ hs.hotkey.bind({ "cmd", "shift" }, "`", function()
 	WM.Actions.cycleAppWindows("prev")
 end)
 
+-- Custom Exposé for current virtual space
+-- Keycode 160 = Mission Control key (F3 on MacBook keyboards)
+--
+-- To use F3 for our custom exposé, we disabled the system Mission Control binding:
+--   defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 34 \
+--     '{ enabled = 0; value = { parameters = (65535, 160, 8781824); type = standard; }; }'
+--   killall cfprefsd  # or log out/in
+--
+-- To re-enable the system Mission Control on F3:
+--   defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 34 \
+--     '{ enabled = 1; value = { parameters = (65535, 160, 8781824); type = standard; }; }'
+--   killall cfprefsd  # or log out/in
+--
+local exposeTap = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
+	if event:getKeyCode() == 160 then
+		WM.Expose.toggle()
+		return true
+	end
+	return false
+end)
+exposeTap:start()
+
 hs.hotkey.bind({ "cmd", "ctrl" }, "h", function()
 	WM:focusDirection("left")
 end)
