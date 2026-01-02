@@ -298,11 +298,15 @@ function Actions.moveDirection(direction)
 		state.screens[currentScreenId][currentSpace].cols[nextColIdx],
 		state.screens[currentScreenId][currentSpace].cols[currentColIdx]
 
-	local nextWindow = getWindow(state.screens[currentScreenId][currentSpace].cols[nextColIdx][1])
-	if nextWindow then
-		bringIntoView(nextWindow)
-		centerMouseInWindow(nextWindow)
-	end
+	-- Retile to apply the new column order
+	retile(currentScreenId, currentSpace)
+
+	-- Update z-order so overlapping windows stack correctly
+	local cols = state.screens[currentScreenId][currentSpace].cols
+	Windows.updateZOrder(cols, focusedWindow:id())
+
+	bringIntoView(focusedWindow)
+	centerMouseInWindow(focusedWindow)
 end
 
 function Actions.moveWindowToNextScreen()
@@ -1415,7 +1419,16 @@ function Actions.scroll(direction, opts)
 	end
 
 	if not ignore then
-		centerMouseInWindow(win)
+		-- Only center mouse if it's outside the window
+		if win then
+			local mousePos = hs.mouse.absolutePosition()
+			local frame = win:frame()
+			local isInside = mousePos.x >= frame.x and mousePos.x <= frame.x + frame.w
+				and mousePos.y >= frame.y and mousePos.y <= frame.y + frame.h
+			if not isInside then
+				centerMouseInWindow(win)
+			end
+		end
 		local delta = (direction == "up" and scrollSpeed) or -scrollSpeed
 		hs.eventtap.event.newScrollEvent({ 0, delta }, {}, "pixel"):post()
 	else

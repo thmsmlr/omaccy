@@ -21,8 +21,10 @@ local Windows = nil
 local Tiling = nil
 
 -- Configuration
-local SNAPSHOT_INTERVAL = 2.0  -- seconds between background snapshot updates
-local THUMBNAIL_PADDING = 20   -- pixels between thumbnails
+local SNAPSHOT_INTERVAL = 5.0       -- seconds between background snapshot updates
+local SNAPSHOT_STALE_TIME = 30.0    -- seconds before a snapshot is considered stale
+local SNAPSHOT_ACTIVE_TIME = 10.0   -- seconds - windows active within this time get priority
+local THUMBNAIL_PADDING = 20        -- pixels between thumbnails
 local THUMBNAIL_MAX_WIDTH = 300
 local THUMBNAIL_MAX_HEIGHT = 200
 local LABEL_HEIGHT = 24
@@ -32,6 +34,7 @@ local HINT_CHARS = "ASDFGHJKLQWERTYUIOPZXCVBNM"
 
 -- State
 local snapshotCache = {}  -- windowId -> { image = hs.image, timestamp = number }
+local lastActiveTime = {} -- windowId -> timestamp when window was last focused
 local snapshotTimer = nil
 local canvas = nil
 local isVisible = false
@@ -107,16 +110,36 @@ local function getAllTrackedWindowIds()
 end
 
 -- Background snapshot update
--- Only captures windows in active (visible) spaces since off-screen windows can't be snapshotted
+-- Smart strategy: prioritize recently active windows, be lazy about inactive ones
 local function updateSnapshots()
 	local visibleWindowIds = getVisibleWindowIds()
 	local allWindowIds = getAllTrackedWindowIds()
 	local now = hs.timer.secondsSinceEpoch()
 
 	for _, winId in ipairs(visibleWindowIds) do
-		-- Only update if cache is stale or missing
 		local cached = snapshotCache[winId]
-		if not cached or (now - cached.timestamp) > SNAPSHOT_INTERVAL then
+		local lastActive = lastActiveTime[winId] or 0
+		local timeSinceActive = now - lastActive
+		local timeSinceCached = cached and (now - cached.timestamp) or math.huge
+
+		-- Determine if we should update this window's snapshot:
+		-- 1. No cached snapshot yet - always capture
+		-- 2. Recently active (within SNAPSHOT_ACTIVE_TIME) - update frequently
+		-- 3. Not recently active - only update if snapshot is stale
+		local shouldUpdate = false
+
+		if not cached then
+			-- No snapshot yet, capture it
+			shouldUpdate = true
+		elseif timeSinceActive < SNAPSHOT_ACTIVE_TIME then
+			-- Recently active window - update if cache is older than interval
+			shouldUpdate = timeSinceCached > SNAPSHOT_INTERVAL
+		else
+			-- Inactive window - only update if really stale
+			shouldUpdate = timeSinceCached > SNAPSHOT_STALE_TIME
+		end
+
+		if shouldUpdate then
 			captureSnapshot(winId)
 		end
 	end
@@ -129,7 +152,15 @@ local function updateSnapshots()
 	for winId, _ in pairs(snapshotCache) do
 		if not validIds[winId] then
 			snapshotCache[winId] = nil
+			lastActiveTime[winId] = nil
 		end
+	end
+end
+
+-- Mark a window as recently active (call this when window is focused)
+function Expose.markWindowActive(winId)
+	if winId then
+		lastActiveTime[winId] = hs.timer.secondsSinceEpoch()
 	end
 end
 
@@ -446,9 +477,16 @@ local function startKeyWatcher()
 
 		local keyCode = event:getKeyCode()
 		local key = hs.keycodes.map[keyCode]
+		local flags = event:getFlags()
 
-		-- F3/Mission Control key (keycode 160) or Escape to close
-		if keyCode == 160 or key == "escape" then
+		-- Escape or Cmd+Ctrl+Up to close
+		if key == "escape" then
+			Expose.hide()
+			return true
+		end
+
+		-- Cmd+Ctrl+Up (keycode 126) to toggle closed
+		if keyCode == 126 and flags.cmd and flags.ctrl and not flags.alt and not flags.shift then
 			Expose.hide()
 			return true
 		end
@@ -592,13 +630,34 @@ function Expose.init(wm)
 	-- Start background snapshot caching
 	startSnapshotTimer()
 
-	print("[Expose] Module initialized with background caching")
+	-- Watch for window focus to mark windows as active and capture fresh snapshots
+	Expose.focusWatcher = hs.window.filter.new():subscribe(
+		hs.window.filter.windowFocused,
+		function(win)
+			if win then
+				local winId = win:id()
+				lastActiveTime[winId] = hs.timer.secondsSinceEpoch()
+				-- Capture a fresh snapshot when window is focused (if it's in a visible space)
+				local visibleIds = getVisibleWindowIds()
+				if visibleIds[winId] then
+					captureSnapshot(winId)
+				end
+			end
+		end
+	)
+
+	print("[Expose] Module initialized with smart snapshot caching")
 end
 
 function Expose.stop()
 	Expose.hide()
 	stopSnapshotTimer()
+	if Expose.focusWatcher then
+		Expose.focusWatcher:unsubscribeAll()
+		Expose.focusWatcher = nil
+	end
 	snapshotCache = {}
+	lastActiveTime = {}
 end
 
 return Expose
